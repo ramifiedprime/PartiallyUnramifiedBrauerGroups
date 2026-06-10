@@ -1,4 +1,5 @@
-# An algorithm, but this time for real.  We want to present the partially ramified Brauer group as a set of pairs $$(b_1,b_2)$$ where $$b_1$$ is a geometric Brauer element and $$b_2$$ is an algebraic one.
+# An algorithm, but this time for real.  
+We want to present the partially ramified Brauer group as a set of pairs $$(b_1,b_2)$$ where $$b_1$$ is a geometric Brauer element and $$b_2$$ is an algebraic one.
 
 ## Step 0: Input
 The input should be a group $$G$$ and a list $$C=\{C_1,\dots,C_k\}$$ of conjugacy classes in $$G$$.
