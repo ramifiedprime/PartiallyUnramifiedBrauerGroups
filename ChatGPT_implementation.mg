@@ -1,21 +1,35 @@
-// ChatGPT_implementation_v5.mg
+// PRB_reference_H1Ghat2.mg
 //
-// Brute-force but mathematically cleaner prototype for the Q-case, 2-primary
-// geometric part.  Main fix relative to v4:
-//   * The algebraic side is computed as actual H^1(U_2, Ghat[2^infty])
-//     with U_2 acting by the cyclotomic character, not as Hom(U_2,Ghat[2]).
-//   * Marking choices are variables.  For a transition C_i^k=C_j the residue
-//     changes by m_i+m_j, so the code searches over markings and records a
-//     witnessing marking shift.
-//   * We do not quotient the residue target.  Equality is checked in Q/Z,
-//     represented by Z/MZ for M the 2-part of exp(G).
+// Small reference implementation for the Q-case, 2-primary partially ramified
+// Brauer-pair computation.
 //
-// This is intentionally enumeration-based.  It is designed to be reliable on
-// the small examples used for debugging; it is not optimized for large groups.
+// This version deliberately puts the algebraic component in
+//     H^1(U_2, Ghat[2])
+// rather than H^1(U_2, Ghat[2^infty]).  Thus it DOES NOT quotient by the
+// discrepancy coming from higher 2-power characters; the user can handle that
+// separately by hand.
+//
+// It is intentionally brute-force and explicit.  It is meant to be easy to
+// audit, not fast.
+//
+// Main entry point:
+//     R := PartiallyRamifiedBrauerPairs(G, Creps);
+//
+// Output pairs are triples
+//     <geo_coords, alg_index, marking_shifts>
+// where
+//     geo_coords      are F_2-coordinates in R`GeometricBasisH2;
+//     alg_index       indexes R`AlgebraicH1Classes;
+//     marking_shifts  is a witness for the lifted marking.
+//
+// Recover data:
+//     Ext := PRBExactSequence(R, P);
+//     D   := PRBMarkedClasses(R, P);
+//     a   := PRBAlgebraicCocycle(R, P);
 
-// -----------------------------------------------------------------------------
-// Small utilities
-// -----------------------------------------------------------------------------
+// ============================================================================
+// Basic utilities
+// ============================================================================
 
 function IsTwoPower(n)
     if n le 0 then return false; end if;
@@ -32,57 +46,51 @@ function TwoPart(n)
     return m;
 end function;
 
-function TwoPartExponentOfGroup(G)
+function TwoPartExponent(G)
     e := 1;
-    for g in G do
-        e := LCM(e, Order(g));
-    end for;
+    for g in G do e := LCM(e, Order(g)); end for;
     return TwoPart(e);
 end function;
 
-function UnitMulMod(a,b,N)
+function UnitMul(a,b,N)
     r := (a*b) mod N;
     if r eq 0 then r := N; end if;
     return r;
 end function;
 
-function UnitInvMod(a,N)
+function UnitInv(a,N)
     aa := a mod N;
     for b in [1..N] do
-        if GCD(b,N) eq 1 and ((aa*b - 1) mod N) eq 0 then
+        if GCD(b,N) eq 1 and ((aa*b-1) mod N) eq 0 then
             return b;
         end if;
     end for;
-    error "UnitInvMod: input is not a unit modulo N";
+    error "UnitInv: not a unit";
 end function;
 
-function UnitOrderMod(a,N)
-    if GCD(a,N) ne 1 then
-        error "UnitOrderMod: input is not a unit modulo N";
-    end if;
-    b := a mod N;
-    if b eq 0 then b := N; end if;
-    c := b;
-    r := 1;
-    while c ne 1 do
-        c := (c*b) mod N;
-        r +:= 1;
+function UnitOrder(a,N)
+    if GCD(a,N) ne 1 then error "UnitOrder: not a unit"; end if;
+    x := a mod N;
+    if x eq 0 then x := N; end if;
+    y := x; o := 1;
+    while y ne 1 do
+        y := (y*x) mod N;
+        o +:= 1;
     end while;
-    return r;
+    return o;
 end function;
 
-function UnitSubgroupClosure(gens,N)
-    S := { 1 };
+function UnitClosure(gens,N)
+    S := {1};
     changed := true;
     while changed do
         changed := false;
         T := S;
         for x in S do
             for g in gens do
-                y := UnitMulMod(x,g,N);
+                y := UnitMul(x,g,N);
                 if not (y in T) then
-                    Include(~T,y);
-                    changed := true;
+                    Include(~T,y); changed := true;
                 end if;
             end for;
         end for;
@@ -91,59 +99,42 @@ function UnitSubgroupClosure(gens,N)
     return S;
 end function;
 
-function UnitGroupGeneratorsFromList(U2,N)
+function GreedyUnitGenerators(U,N)
     gens := [];
-    S := { 1 };
-    for u in U2 do
+    S := {1};
+    for u in U do
         if not (u in S) then
             Append(~gens,u);
-            S := UnitSubgroupClosure(gens,N);
+            S := UnitClosure(gens,N);
         end if;
-        if #S eq #U2 then break; end if;
+        if #S eq #U then break; end if;
     end for;
     return gens;
 end function;
 
-function ClassSet(G,g)
-    return { x^-1*g*x : x in G };
+function AllBits(n)
+    if n eq 0 then return [ [] ]; end if;
+    return [ [ ((m div 2^(i-1)) mod 2) : i in [1..n] ] : m in [0..2^n-1] ];
 end function;
 
-function ClassPowerSet(G,C,k)
-    return { x^k : x in C };
+function SeqKey(S)
+    return Sprint(S);
 end function;
 
-function ClassIndex(Csets,D)
-    for j in [1..#Csets] do
-        if D eq Csets[j] then return j; end if;
-    end for;
-    return 0;
+function Vec0(n)
+    return [ 0 : i in [1..n] ];
 end function;
 
-function CleanClassRepresentatives(G, Creps)
-    // Remove identity and duplicate conjugacy classes.  The identity is not a
-    // ramification class; silently dropping it makes tests like [g : g in G]
-    // mean the complete nontrivial set.
-    reps := [];
-    csets := [];
-    e := Identity(G);
-    for g in Creps do
-        if g eq e then
-            continue;
-        end if;
-        C := ClassSet(G,g);
-        duplicate := false;
-        for D in csets do
-            if C eq D then
-                duplicate := true;
-                break;
-            end if;
-        end for;
-        if not duplicate then
-            Append(~reps,g);
-            Append(~csets,C);
-        end if;
-    end for;
-    return reps, csets;
+function AddMod(a,b,M)
+    return [ (a[i]+b[i]) mod M : i in [1..#a] ];
+end function;
+
+function NegMod(a,M)
+    return [ (-a[i]) mod M : i in [1..#a] ];
+end function;
+
+function ScalarMod(c,a,M)
+    return [ ((c mod M)*a[i]) mod M : i in [1..#a] ];
 end function;
 
 function BitOfModuleElt(v)
@@ -154,99 +145,66 @@ function BitSeq(v)
     return [ (Integers()!x) mod 2 : x in Eltseq(v) ];
 end function;
 
-function CohomologyGroupGenerators(H)
-    gens := [];
-    for i in [1..Ngens(H)] do
-        h := H.i;
-        if h ne Parent(h)!0 then Append(~gens,h); end if;
-    end for;
-    return gens;
+function F2Generators(H)
+    return [ H.i : i in [1..Ngens(H)] | H.i ne H!0 ];
 end function;
 
-function LinCombF2MaybeEmpty(H, basis, coeffs)
+function F2LinearCombination(H, basis, coeffs)
     s := H!0;
-    for j in [1..#basis] do
-        if ((Integers()!coeffs[j]) mod 2) eq 1 then
-            s +:= basis[j];
-        end if;
+    for i in [1..#basis] do
+        if coeffs[i] mod 2 eq 1 then s +:= basis[i]; end if;
     end for;
     return s;
 end function;
 
-function ColumnKernel(A)
-    return Nullspace(Transpose(A));
+function ClassSet(G,g)
+    return { x^-1*g*x : x in G };
 end function;
 
-function TwoCocycleBitFunction(CM, h2elt, G)
-    t := TwoCocycle(CM, h2elt);
+function ClassPower(C,k)
+    return { x^k : x in C };
+end function;
+
+function ClassIndex(Csets,C)
+    for i in [1..#Csets] do
+        if C eq Csets[i] then return i; end if;
+    end for;
+    return 0;
+end function;
+
+// ============================================================================
+// Input, U_2, and residue rows
+// ============================================================================
+
+function CleanC(G, Creps)
+    reps := [];
+    csets := [];
     e := Identity(G);
-    c := BitOfModuleElt(t(<e,e>));
-
-    // Normalize by the coboundary of the 1-cochain s with s(e)=t(e,e),
-    // s(g)=0 otherwise.  In characteristic 2 subtraction is addition.
-    return function(g,h)
-        sg := (g eq e) select c else 0;
-        sh := (h eq e) select c else 0;
-        sgh := (g*h eq e) select c else 0;
-        return (BitOfModuleElt(t(<g,h>)) + sg + sh + sgh) mod 2;
-    end function;
+    for g in Creps do
+        if g eq e then continue; end if;
+        C := ClassSet(G,g);
+        if &and[ C ne D : D in csets ] then
+            Append(~reps,g); Append(~csets,C);
+        end if;
+    end for;
+    return reps, csets;
 end function;
-
-function SeqKey(S)
-    return Sprint(S);
-end function;
-
-function VecAddMod(a,b,M)
-    return [ (a[i]+b[i]) mod M : i in [1..#a] ];
-end function;
-
-function VecNegMod(a,M)
-    return [ (-a[i]) mod M : i in [1..#a] ];
-end function;
-
-function VecScalarMod(c,a,M)
-    return [ ((c mod M)*a[i]) mod M : i in [1..#a] ];
-end function;
-
-function VecZero(n)
-    return [ 0 : i in [1..n] ];
-end function;
-
-// -----------------------------------------------------------------------------
-// U_2 data
-// -----------------------------------------------------------------------------
-
-function U2Data(N)
-    U := [ a : a in [1..N] | GCD(a,N) eq 1 ];
-    U2 := [ a : a in U | IsTwoPower(UnitOrderMod(a,N)) ];
-    Ugens := UnitGroupGeneratorsFromList(U2,N);
-
-    RF := recformat< Modulus, U2, Generators >;
-    return rec< RF | Modulus := N, U2 := U2, Generators := Ugens >;
-end function;
-
-// -----------------------------------------------------------------------------
-// Input validation
-// -----------------------------------------------------------------------------
 
 function ValidateC(G, Creps, Csets)
-    if #Creps eq 0 then
-        return false, "No nonidentity conjugacy classes supplied.";
+    if #Creps eq 0 then return false, "C is empty after removing identity."; end if;
+
+    X := {};
+    for C in Csets do X := X join C; end for;
+    if sub< G | [x : x in X] > ne G then
+        return false, "The union of C does not generate G.";
     end if;
 
-    Ugens := {};
-    for C in Csets do Ugens := Ugens join C; end for;
-    if sub< G | [ x : x in Ugens ] > ne G then
-        return false, "The union of the supplied conjugacy classes does not generate G.";
-    end if;
-
-    unitsG := [ a : a in [1..#G] | GCD(a,#G) eq 1 ];
     for i in [1..#Csets] do
-        for t in unitsG do
-            D := ClassPowerSet(G, Csets[i], t);
-            if ClassIndex(Csets,D) eq 0 then
-                return false,
-                    Sprintf("The supplied classes are not closed under invertible power t=%o on class %o.", t, i);
+        for k in [1..#G] do
+            if GCD(k,#G) eq 1 then
+                if ClassIndex(Csets, ClassPower(Csets[i],k)) eq 0 then
+                    return false, Sprintf("C is not closed under invertible power %o.", k);
+                end if;
             end if;
         end for;
     end for;
@@ -254,436 +212,347 @@ function ValidateC(G, Creps, Csets)
     return true, "ok";
 end function;
 
-function PowerTransitionRows(G, Csets, U2)
+function U2Data(N)
+    U := [ a : a in [1..N] | GCD(a,N) eq 1 ];
+    U2 := [ a : a in U | IsTwoPower(UnitOrder(a,N)) ];
+    gens := GreedyUnitGenerators(U2,N);
+    return U2, gens;
+end function;
+
+function ResidueRows(Csets,U2)
     rows := [];
     for i in [1..#Csets] do
         for k in U2 do
-            j := ClassIndex(Csets, ClassPowerSet(G, Csets[i], k));
-            if j eq 0 then
-                error Sprintf("PowerTransitionRows: class %o powered by %o is not among the supplied classes.", i, k);
-            end if;
-            Append(~rows, <i,k,j>);
+            j := ClassIndex(Csets, ClassPower(Csets[i],k));
+            if j eq 0 then error "ResidueRows: C not U2-stable"; end if;
+            Append(~rows,<i,k,j>);
         end for;
     end for;
     return rows;
 end function;
 
-// -----------------------------------------------------------------------------
-// Geometric part
-// -----------------------------------------------------------------------------
+// ============================================================================
+// Geometric side
+// ============================================================================
 
-function TrivialF2CohomologyModule(G)
+function TrivialF2CM(G)
     F := GF(2);
     mats := [ IdentityMatrix(F,1) : i in [1..Ngens(G)] ];
-    M := GModule(G, mats);
-    return CohomologyModule(G, M);
+    return CohomologyModule(G, GModule(G,mats));
 end function;
 
-function GeometricResidueKernel(G, Creps, CM)
+function NormalizedTwoCocycleBit(CM, h2, G)
+    t := TwoCocycle(CM,h2);
+    e := Identity(G);
+    c := BitOfModuleElt(t(<e,e>));
+
+    return function(g,h)
+        // Add the coboundary of the 1-cochain s with s(e)=t(e,e), s(x)=0 otherwise.
+        sg  := (g eq e) select c else 0;
+        sh  := (h eq e) select c else 0;
+        sgh := (g*h eq e) select c else 0;
+        return (BitOfModuleElt(t(<g,h>)) + sg + sh + sgh) mod 2;
+    end function;
+end function;
+
+function GeometricKernel(G,Creps,CM)
     F := GF(2);
     H2 := CohomologyGroup(CM,2);
-    H2basis := CohomologyGroupGenerators(H2);
-    twos := [ TwoCocycleBitFunction(CM, b, G) : b in H2basis ];
+    H2bas := F2Generators(H2);
+    f := [ NormalizedTwoCocycleBit(CM,b,G) : b in H2bas ];
 
     nrows := &+[ Ngens(Centralizer(G,g)) : g in Creps ];
-    A := ZeroMatrix(F, nrows, #H2basis);
-
-    row := 0;
-    for i in [1..#Creps] do
-        gi := Creps[i];
-        ZG := Centralizer(G, gi);
-        for ell in [1..Ngens(ZG)] do
-            h := ZG.ell;
-            row +:= 1;
-            for j in [1..#H2basis] do
-                A[row,j] := F!((twos[j](gi,h) + twos[j](h,gi)) mod 2);
+    A := ZeroMatrix(F,nrows,#H2bas);
+    r := 0;
+    for g in Creps do
+        Z := Centralizer(G,g);
+        for ell in [1..Ngens(Z)] do
+            h := Z.ell; r +:= 1;
+            for j in [1..#H2bas] do
+                A[r,j] := F!((f[j](g,h)+f[j](h,g)) mod 2);
             end for;
         end for;
     end for;
 
-    K := ColumnKernel(A);
-    KbasisCoords := [ BitSeq(v) : v in Basis(K) ];
-    KbasisH2 := [];
-    for v in KbasisCoords do
-        Append(~KbasisH2, LinCombF2MaybeEmpty(H2, H2basis, v));
-    end for;
+    K := Nullspace(Transpose(A));
+    Kcoords := [ BitSeq(v) : v in Basis(K) ];
+    Kbas := [ F2LinearCombination(H2,H2bas,c) : c in Kcoords ];
 
-    RF := recformat< H2, H2Basis, ResidueMatrix, Kernel, KernelBasisCoords, KernelBasisH2 >;
-    return rec< RF | H2 := H2, H2Basis := H2basis, ResidueMatrix := A,
-                     Kernel := K, KernelBasisCoords := KbasisCoords,
-                     KernelBasisH2 := KbasisH2 >;
+    return H2, H2bas, A, Kcoords, Kbas;
 end function;
 
-function CentralExtensionFromH2(G, CM, h2elt)
-    f := TwoCocycleBitFunction(CM, h2elt, G);
-    Gelts := [ g : g in G ];
-    idx := AssociativeArray();
-    for i in [1..#Gelts] do idx[Gelts[i]] := i; end for;
-    nG := #Gelts;
-    eG := Identity(G);
+function CentralExtensionFromH2(G,CM,h2)
+    f := NormalizedTwoCocycleBit(CM,h2,G);
+    Gelts := [g : g in G];
+    pos := AssociativeArray();
+    for i in [1..#Gelts] do pos[Gelts[i]] := i; end for;
+    n := #Gelts; e := Identity(G);
 
     function PairIndex(a,g)
-        return (a mod 2)*nG + idx[g];
+        return (a mod 2)*n + pos[g];
     end function;
 
     function IndexPair(p)
-        a := (p-1) div nG;
-        i := ((p-1) mod nG) + 1;
+        a := (p-1) div n;
+        i := ((p-1) mod n) + 1;
         return a, Gelts[i];
     end function;
 
-    S := Sym(2*nG);
-
-    function LeftPerm(a,g)
+    S := Sym(2*n);
+    function L(a,g)
         imgs := [];
-        for p in [1..2*nG] do
+        for p in [1..2*n] do
             b,h := IndexPair(p);
-            c := (a + b + f(g,h)) mod 2;
-            Append(~imgs, PairIndex(c, g*h));
+            Append(~imgs, PairIndex((a+b+f(g,h)) mod 2, g*h));
         end for;
         return S!imgs;
     end function;
 
-    gens := [ LeftPerm(1,eG) ];
-    gens cat:= [ LeftPerm(0,G.i) : i in [1..Ngens(G)] ];
-    E := sub< S | gens >;
-    z := E!LeftPerm(1,eG);
+    E := sub< S | [L(1,e)] cat [ L(0,G.i) : i in [1..Ngens(G)] ] >;
+    z := E!L(1,e);
 
     function Lift(g)
-        return E!LeftPerm(0,g);
+        return E!L(0,g);
     end function;
 
     function Projection(x)
-        p0 := PairIndex(0,eG);
-        q := p0^x;
-        a,g := IndexPair(q);
+        p := PairIndex(0,e)^x;
+        a,g := IndexPair(p);
         return g;
     end function;
 
-    RF := recformat< E, z, Lift, Projection, CocycleBit, GElements >;
-    return rec< RF | E := E, z := z, Lift := Lift, Projection := Projection,
-                     CocycleBit := f, GElements := Gelts >;
+    RF := recformat< E, z, Lift, Projection, CocycleBit >;
+    return rec< RF | E:=E, z:=z, Lift:=Lift, Projection:=Projection, CocycleBit:=f >;
 end function;
 
-function BaseGeometricResidueBits(G, Creps, ResidueIndex, Ext)
-    E := Ext`E;
-    z := Ext`z;
-    Lift := Ext`Lift;
-    vals := [];
-    for row in ResidueIndex do
-        i := row[1];
-        k := row[2];
-        j := row[3];
-        lhs := Lift(Creps[i])^k;
-        rhs := Lift(Creps[j]);
-        if IsConjugate(E, lhs, rhs) then
-            Append(~vals, 0);
-        elif IsConjugate(E, lhs, z*rhs) then
-            Append(~vals, 1);
+function BaseGeomBits(Creps,Rows,Ext)
+    E := Ext`E; z := Ext`z; L := Ext`Lift;
+    bits := [];
+    for row in Rows do
+        i := row[1]; k := row[2]; j := row[3];
+        lhs := L(Creps[i])^k;
+        rhs := L(Creps[j]);
+        if IsConjugate(E,lhs,rhs) then
+            Append(~bits,0);
+        elif IsConjugate(E,lhs,z*rhs) then
+            Append(~bits,1);
         else
-            error Sprintf("Geometric residue error on transition class %o --%o--> %o.", i, k, j);
+            error Sprintf("Bad lifted transition %o --%o--> %o",i,k,j);
         end if;
     end for;
-    return vals;
+    return bits;
 end function;
 
-function AdjustResidueByMarking(base, ResidueIndex, shifts)
-    vals := [];
-    for r in [1..#ResidueIndex] do
-        i := ResidueIndex[r][1];
-        j := ResidueIndex[r][3];
-        Append(~vals, (base[r] + shifts[i] + shifts[j]) mod 2);
-    end for;
-    return vals;
+function ShiftBits(bits,Rows,shifts)
+    return [ (bits[r] + shifts[Rows[r][1]] + shifts[Rows[r][3]]) mod 2 : r in [1..#Rows] ];
 end function;
 
-function AllBitVectors(n)
-    if n eq 0 then return [ [] ]; end if;
-    return [ [ ((mask div 2^(i-1)) mod 2) : i in [1..n] ] : mask in [0..2^n-1] ];
-end function;
-
-function EnumerateGeometricMarkedResidues(G, Creps, CM, GK, ResidueIndex)
-    geom := [];
-    d := #GK`KernelBasisH2;
-    allGeoCoords := AllBitVectors(d);
-    allMarkings := AllBitVectors(#Creps);
-
-    for coords in allGeoCoords do
-        h2 := LinCombF2MaybeEmpty(GK`H2, GK`KernelBasisH2, coords);
-        Ext := CentralExtensionFromH2(G, CM, h2);
-        base := BaseGeometricResidueBits(G, Creps, ResidueIndex, Ext);
-        for shifts in allMarkings do
-            res := AdjustResidueByMarking(base, ResidueIndex, shifts);
-            Append(~geom, <coords, shifts, res>);
+function GeometricResidues(G,Creps,CM,H2,Kbas,Rows,M)
+    // Return triples <coordinates in Kbas, marking shifts, residue vector in Z/MZ>.
+    out := [];
+    half := M div 2;
+    for c in AllBits(#Kbas) do
+        h2 := F2LinearCombination(H2,Kbas,c);
+        Ext := CentralExtensionFromH2(G,CM,h2);
+        b0 := BaseGeomBits(Creps,Rows,Ext);
+        for s in AllBits(#Creps) do
+            b := ShiftBits(b0,Rows,s);
+            Append(~out,<c,s,[ (half*x) mod M : x in b ]>);
         end for;
     end for;
-    return geom;
+    return out;
 end function;
 
-// -----------------------------------------------------------------------------
-// Algebraic side: H^1(U_2, Ghat[2^infty])
-// -----------------------------------------------------------------------------
+// ============================================================================
+// Algebraic side: H^1(U_2, Hom(G,Z/2Z))
+// ============================================================================
 
-function HomCharactersToZM(G,M)
-    Gelts := [ g : g in G ];
-    idx := AssociativeArray();
-    for i in [1..#Gelts] do idx[Gelts[i]] := i; end for;
-    gens := [ G.i : i in [1..Ngens(G)] ];
-    m := #gens;
-    zero := [ 0 : x in Gelts ];
+function HomGtoZM(G,M)
+    Gelts := [g : g in G];
+    Gpos := AssociativeArray();
+    for i in [1..#Gelts] do Gpos[Gelts[i]] := i; end for;
+    gens := [G.i : i in [1..Ngens(G)]];
 
-    if M eq 1 or m eq 0 then
-        return [ zero ], Gelts, idx;
+    if M eq 1 or #gens eq 0 then
+        return [ Vec0(#Gelts) ], Gelts, Gpos;
     end if;
 
-    possible := [];
-    for i in [1..m] do
-        Append(~possible, [ a : a in [0..M-1] | ((Order(gens[i])*a) mod M) eq 0 ]);
-    end for;
+    choices := [ [a : a in [0..M-1] | (Order(gens[i])*a) mod M eq 0] : i in [1..#gens] ];
 
-    function Extends(assign)
-        e := Identity(G);
+    function TryExtend(vals)
         A := AssociativeArray();
+        e := Identity(G);
         A[e] := 0;
-        for i in [1..m] do
-            g := gens[i];
-            v := assign[i] mod M;
-            if IsDefined(A,g) and A[g] ne v then return false, zero; end if;
-            A[g] := v;
+        for i in [1..#gens] do
+            if IsDefined(A,gens[i]) and A[gens[i]] ne vals[i] mod M then
+                return false, [];
+            end if;
+            A[gens[i]] := vals[i] mod M;
         end for;
 
-        stepGens := [];
-        stepVals := [];
-        for i in [1..m] do
-            Append(~stepGens, gens[i]);
-            Append(~stepVals, assign[i] mod M);
-            Append(~stepGens, gens[i]^-1);
-            Append(~stepVals, (-assign[i]) mod M);
+        stepG := [];
+        stepV := [];
+        for i in [1..#gens] do
+            Append(~stepG, gens[i]);    Append(~stepV, vals[i] mod M);
+            Append(~stepG, gens[i]^-1); Append(~stepV, (-vals[i]) mod M);
         end for;
 
-        queue := [ e ];
-        head := 1;
+        queue := [e]; head := 1;
         while head le #queue do
-            x := queue[head];
-            head +:= 1;
+            x := queue[head]; head +:= 1;
             vx := A[x];
-            for t in [1..#stepGens] do
-                y := x*stepGens[t];
-                vy := (vx + stepVals[t]) mod M;
+            for t in [1..#stepG] do
+                y := x*stepG[t];
+                vy := (vx+stepV[t]) mod M;
                 if IsDefined(A,y) then
-                    if A[y] ne vy then return false, zero; end if;
+                    if A[y] ne vy then return false, []; end if;
                 else
-                    A[y] := vy;
-                    Append(~queue,y);
+                    A[y] := vy; Append(~queue,y);
                 end if;
             end for;
         end while;
 
-        vals := [];
-        for x in Gelts do
-            if not IsDefined(A,x) then return false, zero; end if;
-            Append(~vals, A[x] mod M);
-        end for;
-        return true, vals;
+        return true, [ A[g] mod M : g in Gelts ];
     end function;
 
     chars := [];
     seen := AssociativeArray();
 
-    procedure Recurse(pos, vals, ~chars, ~seen)
-        if pos gt m then
-            ok, ch := Extends(vals);
+    procedure Recurse(i,vals,~chars,~seen)
+        if i gt #gens then
+            ok,ch := TryExtend(vals);
             if ok then
                 key := SeqKey(ch);
-                if not IsDefined(seen,key) then
-                    seen[key] := true;
-                    Append(~chars,ch);
-                end if;
+                if not IsDefined(seen,key) then seen[key]:=true; Append(~chars,ch); end if;
             end if;
             return;
         end if;
-        for a in possible[pos] do
-            Recurse(pos+1, vals cat [a], ~chars, ~seen);
-        end for;
+        for a in choices[i] do Recurse(i+1, vals cat [a], ~chars, ~seen); end for;
     end procedure;
 
-    Recurse(1, [], ~chars, ~seen);
-    return chars, Gelts, idx;
+    Recurse(1,[],~chars,~seen);
+    return chars, Gelts, Gpos;
 end function;
 
-function ExtendU2Cocycle(Udata, M, Aelts, UgenVals)
-    N := Udata`Modulus;
-    U2 := Udata`U2;
-    Ugens := Udata`Generators;
-    nA := #Aelts[1];
-    zeroA := VecZero(nA);
+function ExtendU2Cocycle(U2,Ugens,N,M,A,genVals)
+    nA := #A[1];
+    f := AssociativeArray();
+    f[1] := Vec0(nA);
 
-    Fmap := AssociativeArray();
-    Fmap[1] := zeroA;
-
-    stepUnits := [];
-    stepVals := [];
-    for sidx in [1..#Ugens] do
-        s := Ugens[sidx];
-        fs := UgenVals[sidx];
-        Append(~stepUnits, s);
-        Append(~stepVals, fs);
-        sinv := UnitInvMod(s,N);
-        // f(s^-1) = s^-1*(-f(s))
-        Append(~stepUnits, sinv);
-        Append(~stepVals, VecScalarMod(sinv, VecNegMod(fs,M), M));
+    stepU := [];
+    stepV := [];
+    for i in [1..#Ugens] do
+        u := Ugens[i];
+        v := genVals[i];
+        Append(~stepU,u); Append(~stepV,v);
+        ui := UnitInv(u,N);
+        // f(u^-1) = u^-1 * (-f(u))
+        Append(~stepU,ui); Append(~stepV, ScalarMod(ui,NegMod(v,M),M));
     end for;
 
-    queue := [ 1 ];
-    head := 1;
+    queue := [1]; head := 1;
     while head le #queue do
-        x := queue[head];
-        head +:= 1;
-        fx := Fmap[x];
-        for t in [1..#stepUnits] do
-            s := stepUnits[t];
-            y := UnitMulMod(x,s,N);
-            // f(x*s) = f(x) + x*f(s)
-            fy := VecAddMod(fx, VecScalarMod(x, stepVals[t], M), M);
-            if IsDefined(Fmap,y) then
-                if Fmap[y] ne fy then return false, []; end if;
+        x := queue[head]; head +:= 1;
+        fx := f[x];
+        for t in [1..#stepU] do
+            u := stepU[t];
+            y := UnitMul(x,u,N);
+            // f(xu) = f(x) + x f(u)
+            fy := AddMod(fx, ScalarMod(x,stepV[t],M), M);
+            if IsDefined(f,y) then
+                if f[y] ne fy then return false, []; end if;
             else
-                Fmap[y] := fy;
-                Append(~queue,y);
+                f[y] := fy; Append(~queue,y);
             end if;
         end for;
     end while;
 
-    vals := [];
-    for u in U2 do
-        if not IsDefined(Fmap,u) then return false, []; end if;
-        Append(~vals, Fmap[u]);
-    end for;
-    return true, vals;
+    return true, [ f[u] : u in U2 ];
 end function;
 
-function EnumerateU2Z1(Udata, M, Aelts)
-    Ugens := Udata`Generators;
-    if #Ugens eq 0 then
-        nA := #Aelts[1];
-        return [ [ VecZero(nA) ] ];
-    end if;
-
+function U2Cocycles(U2,Ugens,N,M,A)
+    if #Ugens eq 0 then return [ [ Vec0(#A[1]) ] ]; end if;
     Z := [];
     seen := AssociativeArray();
 
-    procedure Recurse(pos, vals, ~Z, ~seen)
-        if pos gt #Ugens then
-            ok, coc := ExtendU2Cocycle(Udata, M, Aelts, vals);
+    procedure Recurse(i,vals,~Z,~seen)
+        if i gt #Ugens then
+            ok,coc := ExtendU2Cocycle(U2,Ugens,N,M,A,vals);
             if ok then
                 key := SeqKey(coc);
-                if not IsDefined(seen,key) then
-                    seen[key] := true;
-                    Append(~Z,coc);
-                end if;
+                if not IsDefined(seen,key) then seen[key]:=true; Append(~Z,coc); end if;
             end if;
             return;
         end if;
-        for a in Aelts do
-            Recurse(pos+1, vals cat [a], ~Z, ~seen);
-        end for;
+        for a in A do Recurse(i+1, vals cat [a], ~Z, ~seen); end for;
     end procedure;
 
-    Recurse(1, [], ~Z, ~seen);
+    Recurse(1,[],~Z,~seen);
     return Z;
 end function;
 
-function U2Coboundaries(Udata, M, Aelts)
-    U2 := Udata`U2;
+function U2Coboundaries(U2,M,A)
     B := [];
     seen := AssociativeArray();
-    for a in Aelts do
-        cob := [ VecScalarMod(u-1, a, M) : u in U2 ];
-        key := SeqKey(cob);
-        if not IsDefined(seen,key) then
-            seen[key] := true;
-            Append(~B,cob);
-        end if;
+    for a in A do
+        b := [ ScalarMod(u-1,a,M) : u in U2 ];
+        key := SeqKey(b);
+        if not IsDefined(seen,key) then seen[key]:=true; Append(~B,b); end if;
     end for;
     return B;
 end function;
 
-function CocycleAdd(c1,c2,M)
-    return [ VecAddMod(c1[i], c2[i], M) : i in [1..#c1] ];
+function AddCocycles(c,b,M)
+    return [ AddMod(c[i],b[i],M) : i in [1..#c] ];
 end function;
 
-function H1U2GhatData(G, Creps, Udata, ResidueIndex)
-    M := TwoPartExponentOfGroup(G);
-    Aelts, Gelts, Gidx := HomCharactersToZM(G,M);
-    Z1 := EnumerateU2Z1(Udata, M, Aelts);
-    B1 := U2Coboundaries(Udata, M, Aelts);
+function AlgebraicH1_Ghat2(G,Creps,U2,Ugens,N,Rows)
+    M := 2;
+    A, Gelts, Gpos := HomGtoZM(G,M);
+    Z1 := U2Cocycles(U2,Ugens,N,M,A);
+    B1 := U2Coboundaries(U2,M,A);
 
     Upos := AssociativeArray();
-    for i in [1..#Udata`U2] do Upos[Udata`U2[i]] := i; end for;
+    for i in [1..#U2] do Upos[U2[i]] := i; end for;
 
     used := AssociativeArray();
     classes := [];
     for z in Z1 do
-        key := SeqKey(z);
-        if IsDefined(used,key) then continue; end if;
-        classKeys := [];
-        for b in B1 do
-            zb := CocycleAdd(z,b,M);
-            k := SeqKey(zb);
-            used[k] := true;
-            Append(~classKeys,k);
-        end for;
-        Append(~classes, <z, classKeys>);
+        if IsDefined(used,SeqKey(z)) then continue; end if;
+        for b in B1 do used[SeqKey(AddCocycles(z,b,M))] := true; end for;
+        Append(~classes,z);
     end for;
 
     residues := [];
-    for C in classes do
-        coc := C[1];
+    for z in classes do
         res := [];
-        for row in ResidueIndex do
-            i := row[1];
-            k := row[2];
-            up := Upos[k];
-            chi := coc[up];
-            Append(~res, chi[Gidx[Creps[i]]] mod M);
+        for row in Rows do
+            i := row[1]; k := row[2];
+            chi := z[Upos[k]];
+            Append(~res, chi[Gpos[Creps[i]]] mod M);
         end for;
-        Append(~residues, res);
+        Append(~residues,res);
     end for;
 
-    RF := recformat< Modulus, AElements, GElements, GIndex,
-                     Z1, B1, H1Classes, Residues >;
-    return rec< RF | Modulus := M, AElements := Aelts, GElements := Gelts,
-                     GIndex := Gidx, Z1 := Z1, B1 := B1,
-                     H1Classes := classes, Residues := residues >;
+    return A, Gelts, Gpos, Z1, B1, classes, residues;
 end function;
 
-// -----------------------------------------------------------------------------
-// Matching
-// -----------------------------------------------------------------------------
+// ============================================================================
+// Matching and main function
+// ============================================================================
 
-function GeomBitsToZM(bits,M)
-    if M eq 1 then
-        return [ 0 : b in bits ];
-    end if;
-    half := M div 2;
-    return [ (bits[i]*half) mod M : i in [1..#bits] ];
-end function;
-
-function MatchByEnumeration(GeomMarked, AlgData)
-    M := AlgData`Modulus;
+function MatchPairs(Geo,AlgResidues)
     pairs := [];
     seen := AssociativeArray();
-
-    for gr in GeomMarked do
-        gcoords := gr[1];
-        shifts := gr[2];
-        gresZM := GeomBitsToZM(gr[3], M);
-        for aidx in [1..#AlgData`H1Classes] do
-            if gresZM eq AlgData`Residues[aidx] then
-                key := Sprint(<gcoords,aidx>);
+    for x in Geo do
+        coords := x[1]; shifts := x[2]; gres := x[3];
+        for a in [1..#AlgResidues] do
+            if gres eq AlgResidues[a] then
+                // Marking shifts are witnesses, not extra Brauer elements.
+                key := Sprint(<coords,a>);
                 if not IsDefined(seen,key) then
                     seen[key] := true;
-                    Append(~pairs, <gcoords, aidx, shifts>);
+                    Append(~pairs,<coords,a,shifts>);
                 end if;
             end if;
         end for;
@@ -691,122 +560,96 @@ function MatchByEnumeration(GeomMarked, AlgData)
     return pairs;
 end function;
 
-// -----------------------------------------------------------------------------
-// Main function and helpers to recover exact sequences
-// -----------------------------------------------------------------------------
+function PartiallyRamifiedBrauerPairs(G, Creps : CheckInput:=true)
+    RF := recformat<
+        Ok, Message, G, OriginalCRepresentatives, CRepresentatives, Csets,
+        Modulus, U2, U2Generators, Rows, CM,
+        H2, H2Basis, GeometricResidueMatrix, GeometricKernelCoords,
+        GeometricBasisH2, GeometricResidues,
+        AlgebraicModulus, GhatElements, AlgebraicZ1, AlgebraicB1,
+        AlgebraicH1Classes, AlgebraicResidues,
+        MatchingPairs
+    >;
 
-function PartiallyRamifiedBrauerPairs(G, Creps : CheckInput := true)
-    RF := recformat< Ok, Message, G, GOrder, Modulus, CRepresentatives, OriginalCRepresentatives,
-                     Csets, U2Data, ResidueIndex, CM,
-                     H2, H2Basis, GeometricResidueToH1Matrix,
-                     GeometricKernelBasisCoords, GeometricBasisH2,
-                     GeometricMarkedResidues,
-                     AlgebraicData, AlgebraicModulus, AlgebraicClasses,
-                     AlgebraicResidues, MatchingPairs, MatchingPairsEnumerated >;
-
-    CleanCreps, Csets := CleanClassRepresentatives(G, Creps);
+    reps,csets := CleanC(G,Creps);
+    N := 2*#G;
+    U2,Ugens := U2Data(N);
 
     if (#G mod 2) eq 1 then
-        return rec< RF | Ok := true,
-                         Message := "Odd order group: non-trivial 2-primary Brauer data is zero.",
-                         G := G, GOrder := #G, Modulus := 2*#G,
-                         OriginalCRepresentatives := Creps,
-                         CRepresentatives := CleanCreps,
-                         Csets := Csets,
-                         MatchingPairs := [ <[],1,[]> ],
-                         MatchingPairsEnumerated := true >;
+        return rec< RF | Ok:=true, Message:="Odd order: no 2-primary data.",
+                         G:=G, OriginalCRepresentatives:=Creps,
+                         CRepresentatives:=reps, Csets:=csets,
+                         Modulus:=N, U2:=U2, U2Generators:=Ugens,
+                         MatchingPairs:=[<[],1,[]>] >;
     end if;
 
-    N := 2*#G;
-    Udata := U2Data(N);
-
     if CheckInput then
-        ok, msg := ValidateC(G, CleanCreps, Csets);
+        ok,msg := ValidateC(G,reps,csets);
         if not ok then
-            return rec< RF | Ok := false, Message := msg, G := G, GOrder := #G,
-                             Modulus := N, OriginalCRepresentatives := Creps,
-                             CRepresentatives := CleanCreps, Csets := Csets >;
+            return rec< RF | Ok:=false, Message:=msg, G:=G,
+                             OriginalCRepresentatives:=Creps,
+                             CRepresentatives:=reps, Csets:=csets,
+                             Modulus:=N, U2:=U2, U2Generators:=Ugens >;
         end if;
     end if;
 
-    ResidueIndex := PowerTransitionRows(G, Csets, Udata`U2);
-    CM := TrivialF2CohomologyModule(G);
-    GK := GeometricResidueKernel(G, CleanCreps, CM);
-    GeomMarked := EnumerateGeometricMarkedResidues(G, CleanCreps, CM, GK, ResidueIndex);
-    Alg := H1U2GhatData(G, CleanCreps, Udata, ResidueIndex);
-    Pairs := MatchByEnumeration(GeomMarked, Alg);
+    rows := ResidueRows(csets,U2);
+    M := 2;   // algebraic target is Ghat[2], and geometric residues are F_2-valued
 
-    return rec< RF | Ok := true, Message := "ok", G := G, GOrder := #G, Modulus := N,
-                     OriginalCRepresentatives := Creps,
-                     CRepresentatives := CleanCreps, Csets := Csets,
-                     U2Data := Udata, ResidueIndex := ResidueIndex, CM := CM,
-                     H2 := GK`H2, H2Basis := GK`H2Basis,
-                     GeometricResidueToH1Matrix := GK`ResidueMatrix,
-                     GeometricKernelBasisCoords := GK`KernelBasisCoords,
-                     GeometricBasisH2 := GK`KernelBasisH2,
-                     GeometricMarkedResidues := GeomMarked,
-                     AlgebraicData := Alg, AlgebraicModulus := Alg`Modulus,
-                     AlgebraicClasses := Alg`H1Classes,
-                     AlgebraicResidues := Alg`Residues,
-                     MatchingPairs := Pairs,
-                     MatchingPairsEnumerated := true >;
+    CM := TrivialF2CM(G);
+    H2,H2bas,Gmat,Kcoords,Kbas := GeometricKernel(G,reps,CM);
+    Geo := GeometricResidues(G,reps,CM,H2,Kbas,rows,M);
+
+    A,Gelts,Gpos,Z1,B1,H1,resA := AlgebraicH1_Ghat2(G,reps,U2,Ugens,N,rows);
+    pairs := MatchPairs(Geo,resA);
+
+    return rec< RF |
+        Ok:=true, Message:="ok", G:=G,
+        OriginalCRepresentatives:=Creps, CRepresentatives:=reps, Csets:=csets,
+        Modulus:=N, U2:=U2, U2Generators:=Ugens, Rows:=rows, CM:=CM,
+        H2:=H2, H2Basis:=H2bas, GeometricResidueMatrix:=Gmat,
+        GeometricKernelCoords:=Kcoords, GeometricBasisH2:=Kbas,
+        GeometricResidues:=Geo,
+        AlgebraicModulus:=M, GhatElements:=A, AlgebraicZ1:=Z1,
+        AlgebraicB1:=B1, AlgebraicH1Classes:=H1, AlgebraicResidues:=resA,
+        MatchingPairs:=pairs >;
 end function;
 
-function H2ElementFromPair(R, P)
-    return LinCombF2MaybeEmpty(R`H2, R`GeometricBasisH2, P[1]);
+// ============================================================================
+// Recovery helpers
+// ============================================================================
+
+function PRBH2Element(R,P)
+    return F2LinearCombination(R`H2,R`GeometricBasisH2,P[1]);
 end function;
 
-function GeometricExtensionOfPair(R, P)
-    h2 := H2ElementFromPair(R,P);
-    return CentralExtensionFromH2(R`G, R`CM, h2);
+function PRBExactSequence(R,P)
+    return CentralExtensionFromH2(R`G,R`CM,PRBH2Element(R,P));
 end function;
 
-function MarkedClassesOfPair(R, P)
-    Ext := GeometricExtensionOfPair(R,P);
-    E := Ext`E;
-    z := Ext`z;
-    Lift := Ext`Lift;
+function PRBMarkedClasses(R,P)
+    Ext := PRBExactSequence(R,P);
+    E := Ext`E; z := Ext`z; L := Ext`Lift;
     shifts := P[3];
-    Dclasses := [];
-    for i in [1..#R`CRepresentatives] do
-        x := Lift(R`CRepresentatives[i]);
-        if shifts[i] eq 1 then x := z*x; end if;
-        Append(~Dclasses, ClassSet(E,x));
-    end for;
-    return Dclasses;
+    return [ ClassSet(E, (shifts[i] eq 1) select z*L(R`CRepresentatives[i]) else L(R`CRepresentatives[i]))
+             : i in [1..#R`CRepresentatives] ];
 end function;
 
-function AlgebraicCocycleOfPair(R, P)
-    // Returns a representative cocycle U_2 -> Ghat[2^infty].  The values are
-    // characters G -> Z/MZ stored as value-vectors on R`AlgebraicData`GElements.
-    return R`AlgebraicClasses[P[2]][1];
+function PRBAlgebraicCocycle(R,P)
+    // A representative U_2 -> Hom(G,Z/2Z).  Values are character-vectors on G.
+    return R`AlgebraicH1Classes[P[2]];
 end function;
 
-procedure PrintBrauerPairSummary(R)
+procedure PRBSummary(R)
     if not R`Ok then
         printf "Input failed: %o\n", R`Message;
         return;
     end if;
     printf "Status: %o\n", R`Message;
-    printf "|G| = %o, modulus 2|G| = %o\n", R`GOrder, R`Modulus;
-    printf "number of nonidentity input classes = %o\n", #R`CRepresentatives;
-    if assigned R`GeometricBasisH2 then
-        printf "dim geometric H^2 residue kernel = %o\n", #R`GeometricBasisH2;
-        printf "|H^1(U_2,Ghat[2^infty])| = %o\n", #R`AlgebraicClasses;
-        printf "algebraic modulus M = %o\n", R`AlgebraicModulus;
-        printf "number of residue transition coordinates = %o\n", #R`ResidueIndex;
-        printf "number of marked geometric residue candidates = %o\n", #R`GeometricMarkedResidues;
-        printf "number of matching pairs = %o\n", #R`MatchingPairs;
-    else
-        printf "trivial/early-return case; matching pairs = %o\n", R`MatchingPairs;
-    end if;
+    printf "|G| = %o, modulus = %o, algebraic modulus = %o\n", #R`G, R`Modulus, R`AlgebraicModulus;
+    printf "#classes in C = %o, #U2 = %o, #rows = %o\n", #R`CRepresentatives, #R`U2, #R`Rows;
+    printf "dim geometric kernel = %o\n", #R`GeometricBasisH2;
+    printf "|H^1(U2,Ghat[2])| = %o\n", #R`AlgebraicH1Classes;
+    printf "#matching pairs = %o\n", #R`MatchingPairs;
 end procedure;
 
-// Example:
-//   load "ChatGPT_implementation_v5.mg";
-//   G := CyclicGroup(4);
-//   R := PartiallyRamifiedBrauerPairs(G,[G.1,G.1^3]);
-//   PrintBrauerPairSummary(R);
-//   P := R`MatchingPairs[2];
-//   Ext := GeometricExtensionOfPair(R,P);
-//   E := Ext`E; z := Ext`z; K := sub< E | z >;
