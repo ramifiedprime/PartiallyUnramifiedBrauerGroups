@@ -1,4 +1,4 @@
-// ChatGPT_implementation_fixed.mg
+// ChatGPT_implementation_v2.mg
 //
 // Prototype Magma implementation for partially ramified Brauer pairs over Q.
 // Coefficients for the geometric part are F_2 = Z/2Z.
@@ -19,8 +19,8 @@
 //   R`MatchingPairs             enumerated pairs, if small enough
 //
 // This version avoids the non-portable intrinsic ConjugacyClass(G,g) by using
-// an explicit conjugation loop.  That was the source of the loading error in
-// the first draft.
+// an explicit conjugation loop.  It also treats CohomologyGroup(CM,n) whether
+// Magma returns it as an abelian group or as a vector space.
 
 // -----------------------------------------------------------------------------
 // Small utilities
@@ -91,10 +91,17 @@ function ClassPowerSet(G,C,k)
 end function;
 
 function CohomologyGroupGenerators(H)
-    // CohomologyGroup(CM,n) is an abelian group in the standard Magma package.
-    // For our F_2-coefficients it is elementary abelian, and the standard
-    // generators give an F_2-basis.
-    return [ H.i : i in [1..Ngens(H)] | Order(H.i) ne 1 ];
+    // Magma versions differ here: CohomologyGroup(CM,n) may be returned either
+    // as an abstract abelian group or directly as a vector space over GF(2).
+    // Avoid Order(H.i), since vector-space elements do not have group order.
+    gens := [];
+    for i in [1..Ngens(H)] do
+        h := H.i;
+        if h ne Parent(h)!0 then
+            Append(~gens, h);
+        end if;
+    end for;
+    return gens;
 end function;
 
 function BitOfModuleElt(v)
@@ -588,7 +595,7 @@ end procedure;
 // -----------------------------------------------------------------------------
 // Example usage inside Magma:
 //
-// load "ChatGPT_implementation_fixed.mg";
+// load "ChatGPT_implementation_v2.mg";
 // G := Alt(4);
 // R := PartiallyRamifiedBrauerPairs(G, [ G!(1,2,3), G!(1,3,2) ]);
 // PrintBrauerPairSummary(R);
