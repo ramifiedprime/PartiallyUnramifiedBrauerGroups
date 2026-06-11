@@ -1,655 +1,728 @@
-// PRB_reference_H1Ghat2.mg
+///////////////////////////////////////////////////////////////////////
+// brauer_bg_correct_algorithms.mg
 //
-// Small reference implementation for the Q-case, 2-primary partially ramified
-// Brauer-pair computation.
+// Magma implementation of the two algorithms in the prompt.
 //
-// This version deliberately puts the algebraic component in
-//     H^1(U_2, Ghat[2])
-// rather than H^1(U_2, Ghat[2^infty]).  Thus it DOES NOT quotient by the
-// discrepancy coming from higher 2-power characters; the user can handle that
-// separately by hand.
+// Input convention:
+//     G      : a finite permutation group.
+//     CReps  : a sequence [g1,...,gk] of representatives of the chosen
+//              conjugacy classes C_i in G.
 //
-// It is intentionally brute-force and explicit.  It is meant to be easy to
-// audit, not fast.
+// Output convention:
+//     The main function BrauerCoveringData(G,CReps) returns a record with
+//     enough linear algebra data to inspect every stage of Algorithm 1.
 //
-// Main entry point:
-//     R := PartiallyRamifiedBrauerPairs(G, Creps);
+//     The function BrauerGroupData(cov) implements Algorithm 2.  It returns
+//     the subgroup of the covering used as representatives for the quotient,
+//     chosen as a coordinate-orthogonal complement of the kernel inside the
+//     covering.
 //
-// Output pairs are triples
-//     <geo_coords, alg_index, marking_shifts>
-// where
-//     geo_coords      are F_2-coordinates in R`GeometricBasisH2;
-//     alg_index       indexes R`AlgebraicH1Classes;
-//     marking_shifts  is a witness for the lifted marking.
+// Important mathematical conventions:
+//   * All vector spaces are over F_2.
+//   * H^2(G,Z/2Z) is computed by Magma's finite-group cohomology package.
+//   * A 2-cocycle f represents the central extension with elements (a,g),
+//       (a,g)(b,h) = (a+b+f(g,h), gh).
+//   * For the geometric arithmetic residue of a marked lift \tilde g_i,
+//     the value at u in N_i is 0 if \tilde g_i^u is conjugate to \tilde g_i
+//     in the extension, and 1 otherwise.  This is the additive F_2 convention.
+//   * The algebraic component is H^1(Q(zeta_{2|G|})/Q, Ghat[2]).  Since
+//     Ghat[2] has trivial cyclotomic action, this is Hom((Z/2|G|Z)^*,Ghat[2]).
 //
-// Recover data:
-//     Ext := PRBExactSequence(R, P);
-//     D   := PRBMarkedClasses(R, P);
-//     a   := PRBAlgebraicCocycle(R, P);
+// This file prioritises readability.  It deliberately avoids constructing
+// large abstract central-extension groups: for the 2-covering extensions it
+// computes inside the explicit set {0,1} x G.
+///////////////////////////////////////////////////////////////////////
 
-// ============================================================================
-// Basic utilities
-// ============================================================================
+///////////////////////////////////////////////////////////////////////
+// Records
+///////////////////////////////////////////////////////////////////////
 
-function IsTwoPower(n)
-    if n le 0 then return false; end if;
-    while (n mod 2) eq 0 do n div:= 2; end while;
-    return n eq 1;
+CoveringFormat := recformat<
+    G,
+    CReps,
+    ClassSets,
+    N,
+    UnitGroup,
+    UnitMap,
+    UnitEvenGeneratorIndices,
+    U2Elements,
+    NiElements,
+    ResiduePositions,
+
+    CM2,
+    H2,
+    H2Basis,
+    H2BasisCoords,
+    GeometricKernelBasis,
+    GeometricKernelCoords,
+
+    AbelianQuotient,
+    AbelianMap,
+    AbelianInvariants,
+    Ghat2BasisIndices,
+    Ghat2Dim,
+    Ghat4DoubleBasisIndices,
+
+    ArithmeticBasis,
+    GeometricResidueMatrix,
+    ArithmeticResidueMatrix,
+    CoveringResidueMatrix,
+    CoveringSpace,
+    CoveringBasis,
+    CoveringGeneratorPairs
+>;
+
+BrauerGroupFormat := recformat<
+    Covering,
+    BocksteinWBasis,
+    BocksteinWCoords,
+    VArithmeticBasisIndices,
+    KernelInsideCovering,
+    KernelInsideCoveringBasis,
+    BrauerRepresentativeSpace,
+    BrauerRepresentativeBasis,
+    BrauerRepresentativePairs,
+    QuotientDimension
+>;
+
+///////////////////////////////////////////////////////////////////////
+// Small utilities
+///////////////////////////////////////////////////////////////////////
+
+function IsPowerOfTwoInteger(n)
+    if n le 0 then
+        return false;
+    end if;
+    return n eq 2^Valuation(n,2);
 end function;
 
-function TwoPart(n)
-    m := 1;
-    while (n mod 2) eq 0 do
-        m *:= 2;
-        n div:= 2;
-    end while;
-    return m;
+function F2VecFromSeq(seq)
+    return Vector(GF(2), [ GF(2)!(Integers()!x mod 2) : x in seq ]);
 end function;
 
-function TwoPartExponent(G)
-    e := 1;
-    for g in G do e := LCM(e, Order(g)); end for;
-    return TwoPart(e);
+function F2Value(x)
+    // Magma cocycle values for a module with invariants [2] are vectors
+    // over the integers, printed for example as (1).  Reduce the first
+    // coordinate modulo 2.
+    return Integers()!Eltseq(x)[1] mod 2;
 end function;
 
-function UnitMul(a,b,N)
-    r := (a*b) mod N;
-    if r eq 0 then r := N; end if;
-    return r;
+function C2ModuleValue(a)
+    // Value in the coefficient module Z/2Z used by CohomologyModule(...,[2],...).
+    return RSpace(Integers(),1)![ Integers()!a mod 2 ];
 end function;
 
-function UnitInv(a,N)
-    aa := a mod N;
-    for b in [1..N] do
-        if GCD(b,N) eq 1 and ((aa*b-1) mod N) eq 0 then
-            return b;
+function AddCohomologyElements(H, elems, coeffs)
+    x := H!0;
+    for i in [1..#elems] do
+        if Integers()!coeffs[i] mod 2 eq 1 then
+            x +:= elems[i];
         end if;
     end for;
-    error "UnitInv: not a unit";
+    return x;
 end function;
 
-function UnitOrder(a,N)
-    if GCD(a,N) ne 1 then error "UnitOrder: not a unit"; end if;
-    x := a mod N;
-    if x eq 0 then x := N; end if;
-    y := x; o := 1;
-    while y ne 1 do
-        y := (y*x) mod N;
-        o +:= 1;
-    end while;
-    return o;
+function ElementCoordsF2(x, d)
+    // Coordinates of a quotient RSpace element, reduced modulo 2.
+    s := Eltseq(x);
+    return Vector(GF(2), [ GF(2)!(Integers()!s[i] mod 2) : i in [1..d] ]);
 end function;
 
-function UnitClosure(gens,N)
-    S := {1};
-    changed := true;
-    while changed do
-        changed := false;
-        T := S;
-        for x in S do
-            for g in gens do
-                y := UnitMul(x,g,N);
-                if not (y in T) then
-                    Include(~T,y); changed := true;
-                end if;
-            end for;
-        end for;
-        S := T;
-    end while;
-    return S;
+function RowMatrixFromVectors(Vs, ncols)
+    if #Vs eq 0 then
+        return Matrix(GF(2), 0, ncols, []);
+    end if;
+    return Matrix(GF(2), #Vs, ncols, &cat[ Eltseq(v) : v in Vs ]);
 end function;
 
-function GreedyUnitGenerators(U,N)
-    gens := [];
-    S := {1};
-    for u in U do
-        if not (u in S) then
-            Append(~gens,u);
-            S := UnitClosure(gens,N);
-        end if;
-        if #S eq #U then break; end if;
-    end for;
-    return gens;
+function ZeroMatrixF2(nrows,ncols)
+    return Matrix(GF(2), nrows, ncols, [ GF(2)!0 : i in [1..nrows*ncols] ]);
 end function;
 
-function AllBits(n)
-    if n eq 0 then return [ [] ]; end if;
-    return [ [ ((m div 2^(i-1)) mod 2) : i in [1..n] ] : m in [0..2^n-1] ];
+function DotF2(v,w)
+    return &+[ v[i]*w[i] : i in [1..Degree(Parent(v))] ];
 end function;
 
-function SeqKey(S)
-    return Sprint(S);
+function UnitToInteger(unitMap, u)
+    return Integers()!unitMap(u);
 end function;
 
-function Vec0(n)
-    return [ 0 : i in [1..n] ];
-end function;
-
-function AddMod(a,b,M)
-    return [ (a[i]+b[i]) mod M : i in [1..#a] ];
-end function;
-
-function NegMod(a,M)
-    return [ (-a[i]) mod M : i in [1..#a] ];
-end function;
-
-function ScalarMod(c,a,M)
-    return [ ((c mod M)*a[i]) mod M : i in [1..#a] ];
-end function;
-
-function BitOfModuleElt(v)
-    return (Integers()!Eltseq(v)[1]) mod 2;
-end function;
-
-function BitSeq(v)
-    return [ (Integers()!x) mod 2 : x in Eltseq(v) ];
-end function;
-
-function F2Generators(H)
-    return [ H.i : i in [1..Ngens(H)] | H.i ne H!0 ];
-end function;
-
-function F2LinearCombination(H, basis, coeffs)
-    s := H!0;
-    for i in [1..#basis] do
-        if coeffs[i] mod 2 eq 1 then s +:= basis[i]; end if;
-    end for;
-    return s;
-end function;
+///////////////////////////////////////////////////////////////////////
+// Conjugacy-class utilities
+///////////////////////////////////////////////////////////////////////
 
 function ClassSet(G,g)
-    return { x^-1*g*x : x in G };
+    return { x : x in ConjugacyClass(G,g) };
 end function;
 
-function ClassPower(C,k)
-    return { x^k : x in C };
-end function;
-
-function ClassIndex(Csets,C)
-    for i in [1..#Csets] do
-        if C eq Csets[i] then return i; end if;
+function ClassIndex(x, classSets)
+    for i in [1..#classSets] do
+        if x in classSets[i] then
+            return i;
+        end if;
     end for;
     return 0;
 end function;
 
-// ============================================================================
-// Input, U_2, and residue rows
-// ============================================================================
+function ValidateCAndComputeN(G, CReps)
+    require Order(G) mod 2 eq 0:
+        "Order(G) is odd.  The 2-primary Brauer group computed here is zero.";
 
-function CleanC(G, Creps)
-    reps := [];
-    csets := [];
-    e := Identity(G);
-    for g in Creps do
-        if g eq e then continue; end if;
-        C := ClassSet(G,g);
-        if &and[ C ne D : D in csets ] then
-            Append(~reps,g); Append(~csets,C);
-        end if;
-    end for;
-    return reps, csets;
-end function;
+    N := 2*Order(G);
+    classSets := [ ClassSet(G,g) : g in CReps ];
 
-function ValidateC(G, Creps, Csets)
-    if #Creps eq 0 then return false, "C is empty after removing identity."; end if;
+    // C should not include the identity class.
+    require forall{ i : i in [1..#classSets] | not (Id(G) in classSets[i]) }:
+        "The chosen ramification classes should not contain the identity.";
 
-    X := {};
-    for C in Csets do X := X join C; end for;
-    if sub< G | [x : x in X] > ne G then
-        return false, "The union of C does not generate G.";
-    end if;
+    // The union of the chosen conjugacy classes should generate G.
+    allCElements := &cat[ SetToSequence(S) : S in classSets ];
+    require sub< G | allCElements > eq G:
+        "The union of the chosen conjugacy classes does not generate G.";
 
-    for i in [1..#Csets] do
-        for k in [1..#G] do
-            if GCD(k,#G) eq 1 then
-                if ClassIndex(Csets, ClassPower(Csets[i],k)) eq 0 then
-                    return false, Sprintf("C is not closed under invertible power %o.", k);
-                end if;
-            end if;
+    // Unit group modulo 2|G|.  This also controls the powering action.
+    U, unitMap := UnitGroup(Integers(N));
+
+    // Check closure under invertible powers.  Using units modulo 2|G| is
+    // slightly stronger than using units modulo |G| but is the same for the
+    // powering action on G and is the group needed later for residues.
+    for i in [1..#CReps] do
+        for u in U do
+            k := UnitToInteger(unitMap,u);
+            require ClassIndex(CReps[i]^k, classSets) ne 0:
+                "The chosen classes are not closed under invertible powers.";
         end for;
     end for;
 
-    return true, "ok";
+    U2elts := [ u : u in U | IsPowerOfTwoInteger(Order(u)) ];
+
+    Ni := [];
+    for i in [1..#CReps] do
+        Append(~Ni, [ u : u in U2elts |
+            ClassIndex(CReps[i]^UnitToInteger(unitMap,u), classSets) eq i ]);
+    end for;
+
+    return N, U, unitMap, U2elts, Ni, classSets;
 end function;
 
-function U2Data(N)
-    U := [ a : a in [1..N] | GCD(a,N) eq 1 ];
-    U2 := [ a : a in U | IsTwoPower(UnitOrder(a,N)) ];
-    gens := GreedyUnitGenerators(U2,N);
-    return U2, gens;
+///////////////////////////////////////////////////////////////////////
+// Abelianisation and Ghat[2]
+///////////////////////////////////////////////////////////////////////
+
+function AbelianData(G)
+    // We use Magma's abelian quotient.  The codomain is an abelian group with
+    // invariant-factor generators, so Eltseq(pi(g)) gives coordinates.
+    A, pi := AbelianQuotient(G);
+    invs := [ Order(A.i) : i in [1..Ngens(A)] ];
+    even := [ i : i in [1..#invs] | invs[i] mod 2 eq 0 ];
+    div4 := [ i : i in even | invs[i] mod 4 eq 0 ];
+    return A, pi, invs, even, div4;
 end function;
 
-function ResidueRows(Csets,U2)
+function Ghat2CharacterValue(pi, evenIndices, ell, g)
+    // ell selects the ell-th basis vector of Ghat[2].
+    // This character is the parity of the corresponding abelianisation
+    // coordinate.
+    q := pi(g);
+    coords := Eltseq(q);
+    idx := evenIndices[ell];
+    return Integers()!coords[idx] mod 2;
+end function;
+
+///////////////////////////////////////////////////////////////////////
+// H^2(G,Z/2Z) and geometric residues
+///////////////////////////////////////////////////////////////////////
+
+function H2Data(G)
+    ZZ := Integers();
+    mats := [ IdentityMatrix(ZZ,1) : i in [1..Ngens(G)] ];
+    CM2 := CohomologyModule(G, [2], mats);
+    H2 := CohomologyGroup(CM2, 2);
+    basis := [ H2.i : i in [1..Ngens(H2)] ];
+    coords := [ ElementCoordsF2(basis[i], #basis) : i in [1..#basis] ];
+    return CM2, H2, basis, coords;
+end function;
+
+function GeometricResidueValue(CM2, h2elt, g, h)
+    // h must centralise g.  The commutator of the canonical lifts is
+    // f(g,h)+f(h,g) in F_2.
+    f := TwoCocycle(CM2, h2elt);
+    return (F2Value(f(<g,h>)) + F2Value(f(<h,g>))) mod 2;
+end function;
+
+function GeometricKernel(G, CReps, CM2, H2, H2Basis)
+    tests := [];
+    for i in [1..#CReps] do
+        Zg := Centralizer(G, CReps[i]);
+        for h in Generators(Zg) do
+            Append(~tests, <i,h>);
+        end for;
+    end for;
+
     rows := [];
-    for i in [1..#Csets] do
-        for k in U2 do
-            j := ClassIndex(Csets, ClassPower(Csets[i],k));
-            if j eq 0 then error "ResidueRows: C not U2-stable"; end if;
-            Append(~rows,<i,k,j>);
+    for b in H2Basis do
+        vals := [];
+        for t in tests do
+            Append(~vals, GeometricResidueValue(CM2, b, CReps[t[1]], t[2]));
         end for;
-    end for;
-    return rows;
-end function;
-
-// ============================================================================
-// Geometric side
-// ============================================================================
-
-function TrivialF2CM(G)
-    F := GF(2);
-    mats := [ IdentityMatrix(F,1) : i in [1..Ngens(G)] ];
-    return CohomologyModule(G, GModule(G,mats));
-end function;
-
-function NormalizedTwoCocycleBit(CM, h2, G)
-    t := TwoCocycle(CM,h2);
-    e := Identity(G);
-    c := BitOfModuleElt(t(<e,e>));
-
-    return function(g,h)
-        // Add the coboundary of the 1-cochain s with s(e)=t(e,e), s(x)=0 otherwise.
-        sg  := (g eq e) select c else 0;
-        sh  := (h eq e) select c else 0;
-        sgh := (g*h eq e) select c else 0;
-        return (BitOfModuleElt(t(<g,h>)) + sg + sh + sgh) mod 2;
-    end function;
-end function;
-
-function GeometricKernel(G,Creps,CM)
-    F := GF(2);
-    H2 := CohomologyGroup(CM,2);
-    H2bas := F2Generators(H2);
-    f := [ NormalizedTwoCocycleBit(CM,b,G) : b in H2bas ];
-
-    nrows := &+[ Ngens(Centralizer(G,g)) : g in Creps ];
-    A := ZeroMatrix(F,nrows,#H2bas);
-    r := 0;
-    for g in Creps do
-        Z := Centralizer(G,g);
-        for ell in [1..Ngens(Z)] do
-            h := Z.ell; r +:= 1;
-            for j in [1..#H2bas] do
-                A[r,j] := F!((f[j](g,h)+f[j](h,g)) mod 2);
-            end for;
-        end for;
+        Append(~rows, Vector(GF(2), vals));
     end for;
 
-    K := Nullspace(Transpose(A));
-    Kcoords := [ BitSeq(v) : v in Basis(K) ];
-    Kbas := [ F2LinearCombination(H2,H2bas,c) : c in Kcoords ];
+    A := RowMatrixFromVectors(rows, #tests);
+    K := Nullspace(A);
 
-    return H2, H2bas, A, Kcoords, Kbas;
+    KbasisCoords := [ Vector(GF(2), Eltseq(v)) : v in Basis(K) ];
+    Kbasis := [ AddCohomologyElements(H2, H2Basis, Eltseq(v)) : v in KbasisCoords ];
+
+    return Kbasis, KbasisCoords;
 end function;
 
-function CentralExtensionFromH2(G,CM,h2)
-    f := NormalizedTwoCocycleBit(CM,h2,G);
-    Gelts := [g : g in G];
-    pos := AssociativeArray();
-    for i in [1..#Gelts] do pos[Gelts[i]] := i; end for;
-    n := #Gelts; e := Identity(G);
+///////////////////////////////////////////////////////////////////////
+// Explicit central extension attached to a 2-cocycle
+///////////////////////////////////////////////////////////////////////
 
-    function PairIndex(a,g)
-        return (a mod 2)*n + pos[g];
-    end function;
-
-    function IndexPair(p)
-        a := (p-1) div n;
-        i := ((p-1) mod n) + 1;
-        return a, Gelts[i];
-    end function;
-
-    S := Sym(2*n);
-    function L(a,g)
-        imgs := [];
-        for p in [1..2*n] do
-            b,h := IndexPair(p);
-            Append(~imgs, PairIndex((a+b+f(g,h)) mod 2, g*h));
-        end for;
-        return S!imgs;
-    end function;
-
-    E := sub< S | [L(1,e)] cat [ L(0,G.i) : i in [1..Ngens(G)] ] >;
-    z := E!L(1,e);
-
-    function Lift(g)
-        return E!L(0,g);
-    end function;
-
-    function Projection(x)
-        p := PairIndex(0,e)^x;
-        a,g := IndexPair(p);
-        return g;
-    end function;
-
-    RF := recformat< E, z, Lift, Projection, CocycleBit >;
-    return rec< RF | E:=E, z:=z, Lift:=Lift, Projection:=Projection, CocycleBit:=f >;
+function ExtMulF(f, x, y)
+    return < (x[1] + y[1] + F2Value(f(<x[2],y[2]>))) mod 2, x[2]*y[2] >;
 end function;
 
-function BaseGeomBits(Creps,Rows,Ext)
-    E := Ext`E; z := Ext`z; L := Ext`Lift;
-    bits := [];
-    for row in Rows do
-        i := row[1]; k := row[2]; j := row[3];
-        lhs := L(Creps[i])^k;
-        rhs := L(Creps[j]);
-        if IsConjugate(E,lhs,rhs) then
-            Append(~bits,0);
-        elif IsConjugate(E,lhs,z*rhs) then
-            Append(~bits,1);
-        else
-            error Sprintf("Bad lifted transition %o --%o--> %o",i,k,j);
-        end if;
-    end for;
-    return bits;
+function ExtInvF(f, x)
+    return < (x[1] + F2Value(f(<x[2],x[2]^-1>))) mod 2, x[2]^-1 >;
 end function;
 
-function ShiftBits(bits,Rows,shifts)
-    return [ (bits[r] + shifts[Rows[r][1]] + shifts[Rows[r][3]]) mod 2 : r in [1..#Rows] ];
-end function;
-
-function GeometricResidues(G,Creps,CM,H2,Kbas,Rows,M)
-    // Return triples <coordinates in Kbas, marking shifts, residue vector in Z/MZ>.
-    out := [];
-    half := M div 2;
-    for c in AllBits(#Kbas) do
-        h2 := F2LinearCombination(H2,Kbas,c);
-        Ext := CentralExtensionFromH2(G,CM,h2);
-        b0 := BaseGeomBits(Creps,Rows,Ext);
-        for s in AllBits(#Creps) do
-            b := ShiftBits(b0,Rows,s);
-            Append(~out,<c,s,[ (half*x) mod M : x in b ]>);
-        end for;
-    end for;
-    return out;
-end function;
-
-// ============================================================================
-// Algebraic side: H^1(U_2, Hom(G,Z/2Z))
-// ============================================================================
-
-function HomGtoZM(G,M)
-    Gelts := [g : g in G];
-    Gpos := AssociativeArray();
-    for i in [1..#Gelts] do Gpos[Gelts[i]] := i; end for;
-    gens := [G.i : i in [1..Ngens(G)]];
-
-    if M eq 1 or #gens eq 0 then
-        return [ Vec0(#Gelts) ], Gelts, Gpos;
+function ExtPowF(f, x, n)
+    if n eq 0 then
+        return <0, Id(Parent(x[2]))>;
+    end if;
+    if n lt 0 then
+        return ExtPowF(f, ExtInvF(f,x), -n);
     end if;
 
-    choices := [ [a : a in [0..M-1] | (Order(gens[i])*a) mod M eq 0] : i in [1..#gens] ];
-
-    function TryExtend(vals)
-        A := AssociativeArray();
-        e := Identity(G);
-        A[e] := 0;
-        for i in [1..#gens] do
-            if IsDefined(A,gens[i]) and A[gens[i]] ne vals[i] mod M then
-                return false, [];
-            end if;
-            A[gens[i]] := vals[i] mod M;
-        end for;
-
-        stepG := [];
-        stepV := [];
-        for i in [1..#gens] do
-            Append(~stepG, gens[i]);    Append(~stepV, vals[i] mod M);
-            Append(~stepG, gens[i]^-1); Append(~stepV, (-vals[i]) mod M);
-        end for;
-
-        queue := [e]; head := 1;
-        while head le #queue do
-            x := queue[head]; head +:= 1;
-            vx := A[x];
-            for t in [1..#stepG] do
-                y := x*stepG[t];
-                vy := (vx+stepV[t]) mod M;
-                if IsDefined(A,y) then
-                    if A[y] ne vy then return false, []; end if;
-                else
-                    A[y] := vy; Append(~queue,y);
-                end if;
-            end for;
-        end while;
-
-        return true, [ A[g] mod M : g in Gelts ];
-    end function;
-
-    chars := [];
-    seen := AssociativeArray();
-
-    procedure Recurse(i,vals,~chars,~seen)
-        if i gt #gens then
-            ok,ch := TryExtend(vals);
-            if ok then
-                key := SeqKey(ch);
-                if not IsDefined(seen,key) then seen[key]:=true; Append(~chars,ch); end if;
-            end if;
-            return;
+    ans := <0, Id(Parent(x[2]))>;
+    base := x;
+    m := Integers()!n;
+    while m gt 0 do
+        if m mod 2 eq 1 then
+            ans := ExtMulF(f,ans,base);
         end if;
-        for a in choices[i] do Recurse(i+1, vals cat [a], ~chars, ~seen); end for;
-    end procedure;
-
-    Recurse(1,[],~chars,~seen);
-    return chars, Gelts, Gpos;
-end function;
-
-function ExtendU2Cocycle(U2,Ugens,N,M,A,genVals)
-    nA := #A[1];
-    f := AssociativeArray();
-    f[1] := Vec0(nA);
-
-    stepU := [];
-    stepV := [];
-    for i in [1..#Ugens] do
-        u := Ugens[i];
-        v := genVals[i];
-        Append(~stepU,u); Append(~stepV,v);
-        ui := UnitInv(u,N);
-        // f(u^-1) = u^-1 * (-f(u))
-        Append(~stepU,ui); Append(~stepV, ScalarMod(ui,NegMod(v,M),M));
-    end for;
-
-    queue := [1]; head := 1;
-    while head le #queue do
-        x := queue[head]; head +:= 1;
-        fx := f[x];
-        for t in [1..#stepU] do
-            u := stepU[t];
-            y := UnitMul(x,u,N);
-            // f(xu) = f(x) + x f(u)
-            fy := AddMod(fx, ScalarMod(x,stepV[t],M), M);
-            if IsDefined(f,y) then
-                if f[y] ne fy then return false, []; end if;
-            else
-                f[y] := fy; Append(~queue,y);
-            end if;
-        end for;
+        base := ExtMulF(f,base,base);
+        m div:= 2;
     end while;
-
-    return true, [ f[u] : u in U2 ];
+    return ans;
 end function;
 
-function U2Cocycles(U2,Ugens,N,M,A)
-    if #Ugens eq 0 then return [ [ Vec0(#A[1]) ] ]; end if;
-    Z := [];
-    seen := AssociativeArray();
+function ExtConjugateF(f, x, by)
+    return ExtMulF(f, ExtMulF(f, ExtInvF(f,by), x), by);
+end function;
 
-    procedure Recurse(i,vals,~Z,~seen)
-        if i gt #Ugens then
-            ok,coc := ExtendU2Cocycle(U2,Ugens,N,M,A,vals);
-            if ok then
-                key := SeqKey(coc);
-                if not IsDefined(seen,key) then seen[key]:=true; Append(~Z,coc); end if;
-            end if;
-            return;
+function IsConjugateInExtensionF(G, f, x, y)
+    Eelts := [ <a,g> : a in [0,1], g in G ];
+    for t in Eelts do
+        if ExtConjugateF(f,x,t) eq y then
+            return true;
         end if;
-        for a in A do Recurse(i+1, vals cat [a], ~Z, ~seen); end for;
-    end procedure;
-
-    Recurse(1,[],~Z,~seen);
-    return Z;
-end function;
-
-function U2Coboundaries(U2,M,A)
-    B := [];
-    seen := AssociativeArray();
-    for a in A do
-        b := [ ScalarMod(u-1,a,M) : u in U2 ];
-        key := SeqKey(b);
-        if not IsDefined(seen,key) then seen[key]:=true; Append(~B,b); end if;
     end for;
-    return B;
+    return false;
 end function;
 
-function AddCocycles(c,b,M)
-    return [ AddMod(c[i],b[i],M) : i in [1..#c] ];
+function GeometricArithmeticResidue(CM2, h2elt, g, u, unitMap)
+    f := TwoCocycle(CM2, h2elt);
+    k := UnitToInteger(unitMap,u);
+    lift := <0,g>;
+    liftedPower := ExtPowF(f,lift,k);
+
+    // Residue convention: 0 means the powered lift remains in the marked
+    // conjugacy class, 1 means it has moved to the other lift above the same
+    // base conjugacy class.
+    if IsConjugateInExtensionF(Parent(g), f, liftedPower, lift) then
+        return 0;
+    else
+        return 1;
+    end if;
 end function;
 
-function AlgebraicH1_Ghat2(G,Creps,U2,Ugens,N,Rows)
-    M := 2;
-    A, Gelts, Gpos := HomGtoZM(G,M);
-    Z1 := U2Cocycles(U2,Ugens,N,M,A);
-    B1 := U2Coboundaries(U2,M,A);
+///////////////////////////////////////////////////////////////////////
+// Arithmetic H^1 and residues
+///////////////////////////////////////////////////////////////////////
 
-    Upos := AssociativeArray();
-    for i in [1..#U2] do Upos[U2[i]] := i; end for;
-
-    used := AssociativeArray();
-    classes := [];
-    for z in Z1 do
-        if IsDefined(used,SeqKey(z)) then continue; end if;
-        for b in B1 do used[SeqKey(AddCocycles(z,b,M))] := true; end for;
-        Append(~classes,z);
-    end for;
-
-    residues := [];
-    for z in classes do
-        res := [];
-        for row in Rows do
-            i := row[1]; k := row[2];
-            chi := z[Upos[k]];
-            Append(~res, chi[Gpos[Creps[i]]] mod M);
-        end for;
-        Append(~residues,res);
-    end for;
-
-    return A, Gelts, Gpos, Z1, B1, classes, residues;
+function UnitEvenGeneratorIndices(U)
+    return [ j : j in [1..Ngens(U)] | Order(U.j) mod 2 eq 0 ];
 end function;
 
-// ============================================================================
-// Matching and main function
-// ============================================================================
+function ArithmeticBasis(U, ghat2dim)
+    evenU := UnitEvenGeneratorIndices(U);
+    return [ <j,ell> : j in evenU, ell in [1..ghat2dim] ];
+end function;
 
-function MatchPairs(Geo,AlgResidues)
-    pairs := [];
-    seen := AssociativeArray();
-    for x in Geo do
-        coords := x[1]; shifts := x[2]; gres := x[3];
-        for a in [1..#AlgResidues] do
-            if gres eq AlgResidues[a] then
-                // Marking shifts are witnesses, not extra Brauer elements.
-                key := Sprint(<coords,a>);
-                if not IsDefined(seen,key) then
-                    seen[key] := true;
-                    Append(~pairs,<coords,a,shifts>);
-                end if;
-            end if;
+function ArithmeticResidueValue(unit, arithBasisElt, pi, evenCharIndices, g)
+    // A basis element is a homomorphism U -> Ghat[2]: the selected unit-group
+    // generator maps to the selected character, all other unit generators map
+    // to zero.
+    j := arithBasisElt[1];
+    ell := arithBasisElt[2];
+    coeff := Integers()!Eltseq(unit)[j] mod 2;
+    return (coeff * Ghat2CharacterValue(pi, evenCharIndices, ell, g)) mod 2;
+end function;
+
+///////////////////////////////////////////////////////////////////////
+// Residue matrices and Algorithm 1
+///////////////////////////////////////////////////////////////////////
+
+function MakeResiduePositions(Ni)
+    // We impose the residue equation for every u in every N_i.  This is
+    // redundant but very transparent and avoids choosing generators for N_i.
+    positions := [];
+    for i in [1..#Ni] do
+        for u in Ni[i] do
+            Append(~positions, <i,u>);
         end for;
     end for;
-    return pairs;
+    return positions;
 end function;
 
-function PartiallyRamifiedBrauerPairs(G, Creps : CheckInput:=true)
-    RF := recformat<
-        Ok, Message, G, OriginalCRepresentatives, CRepresentatives, Csets,
-        Modulus, U2, U2Generators, Rows, CM,
-        H2, H2Basis, GeometricResidueMatrix, GeometricKernelCoords,
-        GeometricBasisH2, GeometricResidues,
-        AlgebraicModulus, GhatElements, AlgebraicZ1, AlgebraicB1,
-        AlgebraicH1Classes, AlgebraicResidues,
-        MatchingPairs
+function BuildGeometricResidueMatrix(CM2, geomBasis, CReps, unitMap, residuePositions)
+    rows := [];
+    for b in geomBasis do
+        vals := [];
+        for pos in residuePositions do
+            i := pos[1];
+            u := pos[2];
+            Append(~vals, GeometricArithmeticResidue(CM2, b, CReps[i], u, unitMap));
+        end for;
+        Append(~rows, Vector(GF(2), vals));
+    end for;
+    return RowMatrixFromVectors(rows, #residuePositions);
+end function;
+
+function BuildArithmeticResidueMatrix(arithBasis, pi, evenCharIndices, CReps, residuePositions)
+    rows := [];
+    for b in arithBasis do
+        vals := [];
+        for pos in residuePositions do
+            i := pos[1];
+            u := pos[2];
+            Append(~vals, ArithmeticResidueValue(u, b, pi, evenCharIndices, CReps[i]));
+        end for;
+        Append(~rows, Vector(GF(2), vals));
+    end for;
+    return RowMatrixFromVectors(rows, #residuePositions);
+end function;
+
+function StackResidueMatrices(A,B)
+    // A and B have the same number of columns.  Return vertical concatenation.
+    require Ncols(A) eq Ncols(B): "Residue matrices have incompatible widths.";
+    rows := [];
+    for i in [1..Nrows(A)] do Append(~rows, Vector(GF(2), Eltseq(A[i]))); end for;
+    for i in [1..Nrows(B)] do Append(~rows, Vector(GF(2), Eltseq(B[i]))); end for;
+    return RowMatrixFromVectors(rows, Ncols(A));
+end function;
+
+function PairFromAmbientVector(v, geomBasis, arithBasis)
+    gdim := #geomBasis;
+    adim := #arithBasis;
+    geomCoeffs := [ Integers()!v[i] : i in [1..gdim] ];
+    arithCoeffs := [ Integers()!v[gdim+j] : j in [1..adim] ];
+    return <geomCoeffs, arithCoeffs>;
+end function;
+
+function BrauerCoveringData(G, CReps)
+    N, U, unitMap, U2elts, Ni, classSets := ValidateCAndComputeN(G, CReps);
+
+    CM2, H2, H2Basis, H2BasisCoords := H2Data(G);
+    geomBasis, geomCoords := GeometricKernel(G, CReps, CM2, H2, H2Basis);
+
+    A, pi, invs, evenCharIndices, div4CharIndices := AbelianData(G);
+    ghat2dim := #evenCharIndices;
+    arithBasis := ArithmeticBasis(U, ghat2dim);
+    evenU := UnitEvenGeneratorIndices(U);
+
+    residuePositions := MakeResiduePositions(Ni);
+    geomResidueMat := BuildGeometricResidueMatrix(CM2, geomBasis, CReps, unitMap, residuePositions);
+    arithResidueMat := BuildArithmeticResidueMatrix(arithBasis, pi, evenCharIndices, CReps, residuePositions);
+    R := StackResidueMatrices(geomResidueMat, arithResidueMat);
+
+    CoverSpace := Nullspace(R);
+    coverBasis := [ Vector(GF(2), Eltseq(v)) : v in Basis(CoverSpace) ];
+    coverPairs := [ PairFromAmbientVector(v, geomBasis, arithBasis) : v in coverBasis ];
+
+    return rec< CoveringFormat |
+        G := G,
+        CReps := CReps,
+        ClassSets := classSets,
+        N := N,
+        UnitGroup := U,
+        UnitMap := unitMap,
+        UnitEvenGeneratorIndices := evenU,
+        U2Elements := U2elts,
+        NiElements := Ni,
+        ResiduePositions := residuePositions,
+
+        CM2 := CM2,
+        H2 := H2,
+        H2Basis := H2Basis,
+        H2BasisCoords := H2BasisCoords,
+        GeometricKernelBasis := geomBasis,
+        GeometricKernelCoords := geomCoords,
+
+        AbelianQuotient := A,
+        AbelianMap := pi,
+        AbelianInvariants := invs,
+        Ghat2BasisIndices := evenCharIndices,
+        Ghat2Dim := ghat2dim,
+        Ghat4DoubleBasisIndices := div4CharIndices,
+
+        ArithmeticBasis := arithBasis,
+        GeometricResidueMatrix := geomResidueMat,
+        ArithmeticResidueMatrix := arithResidueMat,
+        CoveringResidueMatrix := R,
+        CoveringSpace := CoverSpace,
+        CoveringBasis := coverBasis,
+        CoveringGeneratorPairs := coverPairs
     >;
+end function;
 
-    reps,csets := CleanC(G,Creps);
-    N := 2*#G;
-    U2,Ugens := U2Data(N);
+///////////////////////////////////////////////////////////////////////
+// Algorithm 2: quotient by the V x W kernel, returned as complement
+///////////////////////////////////////////////////////////////////////
 
-    if (#G mod 2) eq 1 then
-        return rec< RF | Ok:=true, Message:="Odd order: no 2-primary data.",
-                         G:=G, OriginalCRepresentatives:=Creps,
-                         CRepresentatives:=reps, Csets:=csets,
-                         Modulus:=N, U2:=U2, U2Generators:=Ugens,
-                         MatchingPairs:=[<[],1,[]>] >;
-    end if;
+function BocksteinCocycleForCharacter(pi, abIndex, modulus)
+    // Character chi sends the abIndex-th abelian generator to 1/modulus in Q/Z.
+    // The Bockstein for 0 -> C2 -> Q/Z --2--> Q/Z -> 0 is the carry cocycle:
+    //     delta(g,h) = floor((a(g)+a(h))/modulus) mod 2.
+    return func< pair |
+        C2ModuleValue(((Integers()!Eltseq(pi(pair[1]))[abIndex]
+                       + Integers()!Eltseq(pi(pair[2]))[abIndex]) div modulus) mod 2) >;
+end function;
 
-    if CheckInput then
-        ok,msg := ValidateC(G,reps,csets);
-        if not ok then
-            return rec< RF | Ok:=false, Message:=msg, G:=G,
-                             OriginalCRepresentatives:=Creps,
-                             CRepresentatives:=reps, Csets:=csets,
-                             Modulus:=N, U2:=U2, U2Generators:=Ugens >;
+function BocksteinWBasis(cov)
+    H2 := cov`H2;
+    CM2 := cov`CM2;
+    pi := cov`AbelianMap;
+    invs := cov`AbelianInvariants;
+    evenIdx := cov`Ghat2BasisIndices;
+    h2dim := #cov`H2Basis;
+
+    wElts := [];
+    wCoords := [];
+
+    for idx in evenIdx do
+        n := invs[idx];
+        coc := BocksteinCocycleForCharacter(pi, idx, n);
+        h2elt := IdentifyTwoCocycle(CM2, coc);
+        Append(~wElts, h2elt);
+        Append(~wCoords, ElementCoordsF2(h2elt, h2dim));
+    end for;
+
+    // Return a basis, not merely the possibly dependent spanning set.
+    Wmat := RowMatrixFromVectors(wCoords, h2dim);
+    Wspace := RowSpace(Wmat);
+    basisCoords := [ Vector(GF(2), Eltseq(v)) : v in Basis(Wspace) ];
+    basisElts := [ AddCohomologyElements(H2, cov`H2Basis, Eltseq(v)) : v in basisCoords ];
+
+    return basisElts, basisCoords;
+end function;
+
+function VArithmeticBasisIndices(cov)
+    // Image of H^1(U,Ghat[4]) -> H^1(U,Ghat[2]) by doubling.
+    // In invariant-factor coordinates this keeps exactly the Ghat[2] basis
+    // characters coming from abelianisation factors whose order is divisible by 4.
+    div4 := cov`Ghat4DoubleBasisIndices;
+    idxs := [];
+    for a in [1..#cov`ArithmeticBasis] do
+        targetAbIndex := cov`Ghat2BasisIndices[cov`ArithmeticBasis[a][2]];
+        if targetAbIndex in div4 then
+            Append(~idxs, a);
         end if;
+    end for;
+    return idxs;
+end function;
+
+function OrthogonalColumnsToSubspace(rowBasis, ambientDim)
+    // rowBasis spans a subspace S of F_2^ambientDim.  Return a matrix whose
+    // columns give equations cutting out S: v is in S iff v*M = 0.
+    S := RowMatrixFromVectors(rowBasis, ambientDim);
+    Sperp := Nullspace(Transpose(S));
+    perpbasis := [ Vector(GF(2), Eltseq(v)) : v in Basis(Sperp) ];
+    if #perpbasis eq 0 then
+        return Matrix(GF(2), ambientDim, 0, []);
+    end if;
+    // Columns are the perpendicular vectors.
+    return Transpose(RowMatrixFromVectors(perpbasis, ambientDim));
+end function;
+
+function MatrixAppendColumns(A,B)
+    require Nrows(A) eq Nrows(B): "Matrices must have the same number of rows.";
+    entries := [];
+    for i in [1..Nrows(A)] do
+        for j in [1..Ncols(A)] do Append(~entries, A[i,j]); end for;
+        for j in [1..Ncols(B)] do Append(~entries, B[i,j]); end for;
+    end for;
+    return Matrix(GF(2), Nrows(A), Ncols(A)+Ncols(B), entries);
+end function;
+
+function MembershipEquationMatrixForAlgorithm2(cov, Wcoords, Vidcs)
+    gdim := #cov`GeometricKernelBasis;
+    adim := #cov`ArithmeticBasis;
+    h2dim := #cov`H2Basis;
+    ambientDim := gdim + adim;
+
+    // Map from ambient covering coordinates to full H^2 coordinates.
+    KtoH2Rows := [];
+    for v in cov`GeometricKernelCoords do
+        Append(~KtoH2Rows, v);
+    end for;
+    KtoH2 := RowMatrixFromVectors(KtoH2Rows, h2dim);  // gdim x h2dim
+
+    Ageom := ZeroMatrixF2(ambientDim, h2dim);
+    for i in [1..gdim] do
+        for j in [1..h2dim] do
+            Ageom[i,j] := KtoH2[i,j];
+        end for;
+    end for;
+
+    Wcols := OrthogonalColumnsToSubspace(Wcoords, h2dim); // h2dim x eW
+    EqGeom := Ageom * Wcols;                              // ambientDim x eW
+
+    // Arithmetic membership in V.
+    Vrows := [];
+    for idx in Vidcs do
+        row := [ GF(2)!0 : i in [1..adim] ];
+        row[idx] := GF(2)!1;
+        Append(~Vrows, Vector(GF(2), row));
+    end for;
+    Vcols := OrthogonalColumnsToSubspace(Vrows, adim);     // adim x eV
+
+    Aarith := ZeroMatrixF2(ambientDim, adim);
+    for j in [1..adim] do
+        Aarith[gdim+j,j] := GF(2)!1;
+    end for;
+    EqArith := Aarith * Vcols;                             // ambientDim x eV
+
+    return MatrixAppendColumns(EqGeom, EqArith);
+end function;
+
+function AmbientVectorSpace(cov)
+    return VectorSpace(GF(2), #cov`GeometricKernelBasis + #cov`ArithmeticBasis);
+end function;
+
+function SubspaceFromRows(V, rows)
+    if #rows eq 0 then
+        return sub< V | V!0 >;
+    end if;
+    return sub< V | [ V!Eltseq(r) : r in rows ] >;
+end function;
+
+function ExpressInBasisRows(v, basisRows)
+    B := RowMatrixFromVectors(basisRows, Degree(Parent(v)));
+    return Vector(GF(2), Eltseq(Solution(B, v)));
+end function;
+
+function LiftFromBasisCoords(coords, basisRows)
+    if #basisRows eq 0 then
+        return Vector(GF(2), []);
+    end if;
+    n := Degree(Parent(basisRows[1]));
+    ans := Vector(GF(2), [ GF(2)!0 : i in [1..n] ]);
+    for i in [1..#basisRows] do
+        if coords[i] eq GF(2)!1 then
+            ans +:= basisRows[i];
+        end if;
+    end for;
+    return ans;
+end function;
+
+function CoordinateOrthogonalComplementInsideCover(coverBasis, kernelBasis)
+    // Work in coordinates relative to coverBasis.  If K has rows k_i, return
+    // all coordinate vectors x with x dot k_i = 0, then lift back to ambient.
+    cdim := #coverBasis;
+    if cdim eq 0 then
+        return [];
     end if;
 
-    rows := ResidueRows(csets,U2);
-    M := 2;   // algebraic target is Ghat[2], and geometric residues are F_2-valued
+    kcoords := [];
+    for k in kernelBasis do
+        Append(~kcoords, ExpressInBasisRows(k, coverBasis));
+    end for;
 
-    CM := TrivialF2CM(G);
-    H2,H2bas,Gmat,Kcoords,Kbas := GeometricKernel(G,reps,CM);
-    Geo := GeometricResidues(G,reps,CM,H2,Kbas,rows,M);
-
-    A,Gelts,Gpos,Z1,B1,H1,resA := AlgebraicH1_Ghat2(G,reps,U2,Ugens,N,rows);
-    pairs := MatchPairs(Geo,resA);
-
-    return rec< RF |
-        Ok:=true, Message:="ok", G:=G,
-        OriginalCRepresentatives:=Creps, CRepresentatives:=reps, Csets:=csets,
-        Modulus:=N, U2:=U2, U2Generators:=Ugens, Rows:=rows, CM:=CM,
-        H2:=H2, H2Basis:=H2bas, GeometricResidueMatrix:=Gmat,
-        GeometricKernelCoords:=Kcoords, GeometricBasisH2:=Kbas,
-        GeometricResidues:=Geo,
-        AlgebraicModulus:=M, GhatElements:=A, AlgebraicZ1:=Z1,
-        AlgebraicB1:=B1, AlgebraicH1Classes:=H1, AlgebraicResidues:=resA,
-        MatchingPairs:=pairs >;
+    Kmat := RowMatrixFromVectors(kcoords, cdim);
+    perpCoordSpace := Nullspace(Transpose(Kmat));
+    perpCoords := [ Vector(GF(2), Eltseq(v)) : v in Basis(perpCoordSpace) ];
+    return [ LiftFromBasisCoords(v, coverBasis) : v in perpCoords ];
 end function;
 
-// ============================================================================
-// Recovery helpers
-// ============================================================================
+function BrauerGroupData(cov)
+    Wbasis, Wcoords := BocksteinWBasis(cov);
+    Vidcs := VArithmeticBasisIndices(cov);
 
-function PRBH2Element(R,P)
-    return F2LinearCombination(R`H2,R`GeometricBasisH2,P[1]);
+    ambient := AmbientVectorSpace(cov);
+    coverSub := SubspaceFromRows(ambient, cov`CoveringBasis);
+
+    EqKW := MembershipEquationMatrixForAlgorithm2(cov, Wcoords, Vidcs);
+    KWspace := Nullspace(EqKW);
+    KWbasis := [ Vector(GF(2), Eltseq(v)) : v in Basis(KWspace) ];
+    KWsub := SubspaceFromRows(ambient, KWbasis);
+
+    kernelSub := coverSub meet KWsub;
+    kernelBasis := [ Vector(GF(2), Eltseq(v)) : v in Basis(kernelSub) ];
+
+    brBasis := CoordinateOrthogonalComplementInsideCover(cov`CoveringBasis, kernelBasis);
+    brSub := SubspaceFromRows(ambient, brBasis);
+    brPairs := [ PairFromAmbientVector(v, cov`GeometricKernelBasis, cov`ArithmeticBasis) : v in brBasis ];
+
+    return rec< BrauerGroupFormat |
+        Covering := cov,
+        BocksteinWBasis := Wbasis,
+        BocksteinWCoords := Wcoords,
+        VArithmeticBasisIndices := Vidcs,
+        KernelInsideCovering := kernelSub,
+        KernelInsideCoveringBasis := kernelBasis,
+        BrauerRepresentativeSpace := brSub,
+        BrauerRepresentativeBasis := brBasis,
+        BrauerRepresentativePairs := brPairs,
+        QuotientDimension := Dimension(coverSub) - Dimension(kernelSub)
+    >;
 end function;
 
-function PRBExactSequence(R,P)
-    return CentralExtensionFromH2(R`G,R`CM,PRBH2Element(R,P));
-end function;
+///////////////////////////////////////////////////////////////////////
+// Printing helpers
+///////////////////////////////////////////////////////////////////////
 
-function PRBMarkedClasses(R,P)
-    Ext := PRBExactSequence(R,P);
-    E := Ext`E; z := Ext`z; L := Ext`Lift;
-    shifts := P[3];
-    return [ ClassSet(E, (shifts[i] eq 1) select z*L(R`CRepresentatives[i]) else L(R`CRepresentatives[i]))
-             : i in [1..#R`CRepresentatives] ];
-end function;
-
-function PRBAlgebraicCocycle(R,P)
-    // A representative U_2 -> Hom(G,Z/2Z).  Values are character-vectors on G.
-    return R`AlgebraicH1Classes[P[2]];
-end function;
-
-procedure PRBSummary(R)
-    if not R`Ok then
-        printf "Input failed: %o\n", R`Message;
-        return;
-    end if;
-    printf "Status: %o\n", R`Message;
-    printf "|G| = %o, modulus = %o, algebraic modulus = %o\n", #R`G, R`Modulus, R`AlgebraicModulus;
-    printf "#classes in C = %o, #U2 = %o, #rows = %o\n", #R`CRepresentatives, #R`U2, #R`Rows;
-    printf "dim geometric kernel = %o\n", #R`GeometricBasisH2;
-    printf "|H^1(U2,Ghat[2])| = %o\n", #R`AlgebraicH1Classes;
-    printf "#matching pairs = %o\n", #R`MatchingPairs;
+procedure PrintCoveringSummary(cov)
+    print "===== Covering data =====";
+    print "|G| =", Order(cov`G);
+    print "Number of chosen conjugacy classes =", #cov`CReps;
+    print "N = 2|G| =", cov`N;
+    print "dim_F2 H^2(G,Z/2) =", #cov`H2Basis;
+    print "dim_F2 geometric marked subgroup =", #cov`GeometricKernelBasis;
+    print "dim_F2 Ghat[2] =", cov`Ghat2Dim;
+    print "dim_F2 arithmetic H^1 =", #cov`ArithmeticBasis;
+    print "Number of residue equations used =", #cov`ResiduePositions;
+    print "dim_F2 covering =", Dimension(cov`CoveringSpace);
+    print "Covering basis vectors are stored in cov`CoveringBasis.";
+    print "Covering generator pairs are stored in cov`CoveringGeneratorPairs.";
 end procedure;
 
+procedure PrintBrauerSummary(br)
+    print "===== Brauer group data =====";
+    print "dim_F2 kernel inside covering =", Dimension(br`KernelInsideCovering);
+    print "dim_F2 Brauer group quotient =", br`QuotientDimension;
+    print "Brauer representative basis vectors are stored in br`BrauerRepresentativeBasis.";
+    print "Brauer representative pairs are stored in br`BrauerRepresentativePairs.";
+end procedure;
+
+///////////////////////////////////////////////////////////////////////
+// Minimal example template
+///////////////////////////////////////////////////////////////////////
+/*
+load "brauer_bg_correct_algorithms.mg";
+
+G := AlternatingGroup(4);
+// For example, use the two non-identity power-stable pieces represented by
+// a 3-cycle and a double transposition.  Adjust CReps to your actual C.
+CReps := [ G!(1,2,3), G!((1,2)(3,4)) ];
+
+cov := BrauerCoveringData(G, CReps);
+PrintCoveringSummary(cov);
+
+br := BrauerGroupData(cov);
+PrintBrauerSummary(br);
+*/
