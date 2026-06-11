@@ -7,7 +7,7 @@ C2:=AbelianGroup([2]);
 // H2Marked is the set of marked elements in H2.
 DataFormat := recformat< G, C, M, H2, CMH2, H2Marked >;
 
-function initialise(G,C)
+function InitialiseDataStructure(G,C)
     F2 := GF(2);
     M  := TrivialModule(G, F2);
     CMH2 := CohomologyModule(G, M);
@@ -16,25 +16,26 @@ function initialise(G,C)
 end function;
 
 function FindMarkedElements(R)
-    Gab,Gabmap:=AbelianQuotient(R`G);
     winners:=[**];
     for beta in R`H2 do
-        Gbeta, phibeta, psibeta:= Extension(R`CMH2, beta);
+        GbetaFP, phibetaFP, psibetaFP := Extension(R`CMH2, beta);
+        Gbeta, isoToPerm := PermutationGroup(GbetaFP);
+        phibeta := hom< Gbeta -> R`G | [ phibetaFP((Gbeta.i) @@ isoToPerm) : i in [1..Ngens(Gbeta)] ]>;
         success:=true;
         for g in R`C do
-            printf "g:%o, beta=%o\n", g, beta;
-            _,gtilde:=HasPreimage(g,phibeta);
-            ZGgab,ZGgabmap:=AbelianQuotient(Centraliser(R`G,g));
-            for hab in Generators(ZGgab) do
-                _,h:=HasPreimage(hab,ZGgabmap);
-                _,htilde:=HasPreimage(h,phibeta);;
-                if htilde*gtilde*htilde^(-1)*gtilde^(-1) ne Id(Gbeta) then
+            // printf "g:%o, beta=%o\n", g, beta;
+            _,gtilde:=HasPreimage(phibeta,g);
+            ZGg:=Centraliser(R`G,g);
+            for h in Generators(ZGg) do
+                _,htilde:=HasPreimage(phibeta,h);
+                if (gtilde, htilde) ne Id(Gbeta) then
                     success:=false;
-                    printf "ERROR:  %o\n", htilde*gtilde*htilde^(-1)*gtilde^(-1);
-                    continue;
+                    // printf "ERROR:  %o\n", beta;
+                    break;
                 end if;
             end for;
-            if not success then continue; end if;
+            // print "help";
+            if not success then break; end if;
         end for;
         if success then
             Append(~winners,beta);
@@ -43,9 +44,11 @@ function FindMarkedElements(R)
     return winners;
 end function;
 
-
-G:=Alt(4);
-Gab,ab:=AbelianQuotient(G);
-C:=[G!(1,2,3),G!(1,2,4),G!(1,2)(3,4)];
-R:=initialise(G,C);
+// G:=Alt(4);
+// // Gab,ab:=AbelianQuotient(G);
+// C:=[G!(1,2,3),G!(1,2,4),G!(1,2)(3,4)];
+// R:=InitialiseDataStructure(G,C);
+G:=Sym(4);
+C:=[G!(1,2,3)];
+R:=InitialiseDataStructure(G,C);
 R`H2Marked:=FindMarkedElements(R);
