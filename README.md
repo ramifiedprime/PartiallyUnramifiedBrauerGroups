@@ -46,6 +46,6 @@ Compare residues and assemble the appropriate pairs.
 ## Algorithm 2: Compute the Brauer group
 Using the data computed in the previous group, we now compute the kernel of the covering.  This is determined mathematically as follows.  Let 
     * $$V:=\text{Im}(2(\hat{G}[4])\subset H^1(\mathbb{Q}(\zeta_{2|G|}/\mathbb{Q}), \hat{G}[2]))$$.
-    * $$W:=\text{Im(\hat{G}/2\hat{G})\subseteq H^2(G,\mathbb{Z}/2\mathbb{Z})}$$
+    * $$W:=\text{Im}(\hat{G}/2\hat{G})\subseteq H^2(G,\mathbb{Z}/2\mathbb{Z})}$$
     * We have $$\text{Br}_{\mathcal{C}}BG = \widetilde{\text{Br}_{\mathcal{C}}}BG/\left(\widetilde{\text{Br}_{\mathcal{C}}}BG\cap V\times W\right)$$
 Actually, since the Brauer group will be 2-torsion, we will not construct the quotient but instead take the orthogonal complement of $$\left(\widetilde{\text{Br}_{\mathcal{C}}}BG\cap V\times W\right)$$ in $$\widetilde{\text{Br}_{\mathcal{C}}}BG$$.
