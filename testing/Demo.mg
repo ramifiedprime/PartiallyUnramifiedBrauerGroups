@@ -1,4 +1,4 @@
-load "main.mg";
+load "../main.mg";
 
 procedure printdata(R)
     printf "BrauerGroup: %o\nExtra factor: %o\n\n", AbelianInvariants(R`Btilde), AbelianInvariants(R`Gabmod2);
@@ -56,54 +56,11 @@ for k in [1..5] do
     printf "C_%o x C_%o\n", n, n;
     printdata(R);
 end for;
-// printf "\n----------------------------------------\nSPECIAL GROUP\n----------------------------------------\n";
-//     G:=PermutationGroup(FPGroup(SmallGroup(32,5)));
-//     g:=Random(G);
-//     while Order(g) ne 8 do g:=Random(G); end while; 
-//     C:=[x[3] : x in ConjugacyClasses(G) | x[1] eq 8];
-//     R:=Btilde(G,C);
-//     printf "%o\n", GroupName(G);
-//     printdata(R);
-// for GC in testgroups do
-//     R:=Btilde(GC[1],GC[2]);
-//     // print G;
-//     // print C;
-//     print GroupName(GC[1]);
-//     print R`Btilde;
-//     print "";
-// end for;
-
-
-
-//     G:=CyclicGroup(4);
-//     C:=[ G.1, G.1^3 ];
-// Append(~testgroups, [*G,C*]);
-//     G:=CyclicGroup(8);
-//     C:=[ g : g in G | g ne Id(G)];
-// Append(~testgroups, [*G,C*]);
-//     G:=Sym(4);
-//     C:=[ G!(1,2), G!(1,2,3) ];
-// Append(~testgroups, [*G,C*]);
-//     G:=Alt(4);
-//     C:=[ G!(1,2,3), G!(1,2,4) ];
-// Append(~testgroups, [*G,C*]);
-
-
-// // procedure testsize(G,C)
-// //     R := PartiallyRamifiedBrauerPairs(G, C);
-// //     printf "Group: %o\nConjugacy Classes: %o\nSize of Brauer: %o\n\n", GroupName(G), C, #R`MatchingPairs;
-// // end procedure;
-
-// for GC in testgroups do
-//     R:=Btilde(GC[1],GC[2]);
-//     // print G;
-//     // print C;
-//     print GroupName(GC[1]);
-//     print R`Btilde;
-//     print "";
-// end for;
-
-
-
-
-
+printf "\n----------------------------------------\nSPECIAL GROUP\n----------------------------------------\n";
+    G:=PermutationGroup(FPGroup(SmallGroup(32,5)));
+    g:=Random(G);
+    while Order(g) ne 8 do g:=Random(G); end while; 
+    C:=[x[3] : x in ConjugacyClasses(G) | x[1] eq 8];
+    R:=Btilde(G,C);
+    printf "%o\n", GroupName(G);
+    printdata(R);

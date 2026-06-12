@@ -67,12 +67,11 @@ end function;
 
 /////////////////////////////////////////////////////////////////////
 // Given an element beta of R`H2, tests whether the element is
-// geometrically unramified.
+// geometrically unramified.  Deprecated now.
 function IsGeometricallyMarked(beta,R)
     GbetaFP,phibetaFP,psibetaFP:=Extension(R`CMH2,beta);
     Gbeta,isoToPerm:=PermutationGroup(GbetaFP);
-    phibeta:=hom<Gbeta->R`G|
-        [phibetaFP(Gbeta.i@@isoToPerm):i in [1..Ngens(Gbeta)]]>;
+    phibeta:=hom<Gbeta->R`G|[phibetaFP(Gbeta.i@@isoToPerm):i in [1..Ngens(Gbeta)]]>;
 
     for g in R`C do // here is where we construct the residue map at g
         success,gtilde:=HasPreimage(g,phibeta);
@@ -98,13 +97,19 @@ procedure GetMarkedGeometricElements(~R)
     R`F2:=TrivialModule(R`G,F2);
     R`CMH2:=CohomologyModule(R`G,R`F2);
     R`H2:=CohomologyGroup(R`CMH2,2);
-    winners:=[];
-    for beta in R`H2 do
-        if IsGeometricallyMarked(beta,R) then
-            Append(~winners,beta);
-        end if;
+    rows:=[];
+    for beta in Basis(R`H2) do
+        beta_cocycle:=TwoCocycle(R`CMH2,beta);
+        row:=[];
+        for g in R`C do
+            for h in Generators(Centraliser(R`G,g)) do
+                Append(~row,(beta_cocycle(<g,h>)[1]+beta_cocycle(<h,g>)[1]));
+            end for;
+        end for;
+        Append(~rows, row);
     end for;
-    R`H2Marked:=sub<R`H2|winners>;
+    M:=Matrix(F2, rows);
+    R`H2Marked:=sub<R`H2|Kernel(M)>;
 end procedure;
 
 
