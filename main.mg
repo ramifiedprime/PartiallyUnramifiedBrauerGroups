@@ -188,7 +188,7 @@ end procedure;
 
 /////////////////////////////////////////////////////////////////////
 // Returns the H1 component of an element of the abstract Btilde group.
-function (x,R)
+function BtildeAlgebraicComponent(x,R)
     coeffs:=Eltseq(x);
     a:=R`H1!0;
     for i in [1..#coeffs] do
@@ -202,7 +202,7 @@ end function;
 
 /////////////////////////////////////////////////////////////////////
 // Returns the H2 component of an element of the abstract Btilde group.
-function BtildeH2Component(x,R)
+function BtildeGeometricComponent(x,R)
     coeffs:=Eltseq(x);
     b:=R`H2!0;
     for i in [1..#coeffs] do
